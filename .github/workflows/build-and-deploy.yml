@@ -42,6 +42,7 @@ jobs:
           TEST_BASE_URL: http://test
         run: |
           pip install -e ".[dev]"
+          playwright install firefox
           PYTHONPATH=src pytest -v tests/
 
   build-and-push:
