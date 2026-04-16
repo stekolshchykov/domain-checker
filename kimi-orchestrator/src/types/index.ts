@@ -24,6 +24,8 @@ export type DomainIdea = z.infer<typeof DomainIdeaSchema>;
 
 export const GenerateResponseSchema = z.object({
   domains: z.array(DomainIdeaSchema).min(1).max(100),
+  colorPalette: z.array(z.string().regex(/^#[0-9A-Fa-f]{6}$/)).length(5),
+  logos: z.array(z.string().min(50).max(50000)).length(5),
   meta: z.object({
     generatedCount: z.number().int().min(0),
     deduplicated: z.boolean(),
@@ -81,6 +83,8 @@ export const FinalCheckResponseSchema = z.object({
   results: z.array(FinalResultSchema),
   checkedAt: z.string().datetime(),
   totalChecks: z.number().int(),
+  colorPalette: z.array(z.string()).optional(),
+  logos: z.array(z.string()).optional(),
 });
 
 export type FinalCheckResponse = z.infer<typeof FinalCheckResponseSchema>;

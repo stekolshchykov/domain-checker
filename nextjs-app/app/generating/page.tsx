@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import { Sparkles, Wand2, Lightbulb, Search } from "lucide-react";
+import { Button } from "@/components/ui/Button";
 import { ProgressBar } from "@/components/ui/ProgressBar";
 import { useSession } from "@/components/SessionProvider";
 import { generateDomainIdeas } from "@/lib/actions";
@@ -18,7 +19,7 @@ const STEPS = [
 
 export default function GeneratingPage() {
   const router = useRouter();
-  const { brief, setIdeas } = useSession();
+  const { brief, setIdeas, setGenerationExtras } = useSession();
   const [progress, setProgress] = useState(10);
   const [stepIndex, setStepIndex] = useState(0);
   const [error, setError] = useState("");
@@ -47,6 +48,7 @@ export default function GeneratingPage() {
         if (!mounted) return;
         setProgress(100);
         setIdeas(result.domains);
+        setGenerationExtras(result.colorPalette, result.logos);
 
         timers.push(
           setTimeout(() => {
@@ -74,12 +76,9 @@ export default function GeneratingPage() {
             Generation failed
           </h2>
           <p className="mb-6 text-white/60">{error}</p>
-          <button
-            onClick={() => router.push("/brief")}
-            className="rounded-xl bg-white px-6 py-2.5 font-medium text-gray-950 hover:bg-gray-100"
-          >
+          <Button onClick={() => router.push("/brief")}>
             Try again
-          </button>
+          </Button>
         </div>
       </main>
     );

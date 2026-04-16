@@ -13,9 +13,11 @@ import {
   TrendingUp,
   Minimize2,
   ExternalLink,
+  Palette,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { useSession } from "@/components/SessionProvider";
+import { Pill } from "@/components/ui/Pill";
 import { Stepper } from "@/components/Stepper";
 import type { DomainResult, PriceOption } from "@/lib/types";
 
@@ -27,6 +29,16 @@ const REGISTRAR_META: Record<string, { label: string; color: string }> = {
   letshost: { label: "LetsHost", color: "text-amber-300" },
   cloudflare: { label: "Cloudflare", color: "text-orange-300" },
 };
+
+function sanitizeSvg(svg: string): string {
+  const s = svg.trim();
+  if (!s.startsWith("<svg")) return "";
+  // strip scripts and event handlers
+  return s
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/javascript:/gi, "")
+    .replace(/on\w+\s*=/gi, "");
+}
 
 function formatRegistrar(po: PriceOption) {
   const meta = REGISTRAR_META[po.source] || {
@@ -42,7 +54,7 @@ function formatRegistrar(po: PriceOption) {
 
 export default function ResultsPage() {
   const router = useRouter();
-  const { results, checkedAt, clearSession } = useSession();
+  const { results, checkedAt, colorPalette, logos, clearSession } = useSession();
   const [sort, setSort] = useState<SortMode>("available");
 
   useEffect(() => {
@@ -129,6 +141,58 @@ export default function ResultsPage() {
           </div>
         </div>
 
+        {/* Brand Identity */}
+        {(colorPalette || logos) && (
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mb-6 rounded-2xl border border-white/10 bg-white/[0.03] px-5 py-5"
+          >
+            <div className="mb-4 flex items-center gap-2 text-white">
+              <Palette className="h-5 w-5 text-indigo-300" />
+              <span className="font-semibold">Brand Identity</span>
+            </div>
+
+            {colorPalette && (
+              <div className="mb-5 flex flex-wrap items-center gap-3">
+                {colorPalette.map((color, i) => (
+                  <div key={i} className="flex items-center gap-2">
+                    <div
+                      className="h-10 w-10 rounded-full border border-white/10 shadow"
+                      style={{ backgroundColor: color }}
+                      title={color}
+                    />
+                    <span className="text-xs text-white/60 font-mospace">{color}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {logos && (
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
+                {logos.map((rawSvg, i) => {
+                  const svg = sanitizeSvg(rawSvg);
+                  return (
+                    <div
+                      key={i}
+                      className="flex aspect-square items-center justify-center rounded-xl border border-white/10 bg-white/[0.03] p-4"
+                    >
+                      {svg ? (
+                        <div
+                          className="h-full w-full"
+                          dangerouslySetInnerHTML={{ __html: svg }}
+                        />
+                      ) : (
+                        <span className="text-xs text-white/30">Logo {i + 1}</span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </motion.div>
+        )}
+
         {/* Sort tabs */}
         <div className="mb-6 flex flex-wrap gap-2">
           {[
@@ -137,21 +201,14 @@ export default function ResultsPage() {
             { key: "brand", label: "Best brand", icon: Crown },
             { key: "short", label: "Shortest first", icon: Minimize2 },
           ].map((opt) => (
-            <button
+            <Pill
               key={opt.key}
+              selected={sort === opt.key}
               onClick={() => setSort(opt.key as SortMode)}
-              className={`
-                inline-flex items-center gap-1.5 rounded-full px-4 py-2 text-sm font-medium transition-all
-                ${
-                  sort === opt.key
-                    ? "bg-white text-gray-950"
-                    : "bg-white/5 text-white/70 hover:bg-white/10"
-                }
-              `}
+              icon={<opt.icon className="h-4 w-4" />}
             >
-              <opt.icon className="h-4 w-4" />
               {opt.label}
-            </button>
+            </Pill>
           ))}
         </div>
 
@@ -269,7 +326,7 @@ export default function ResultsPage() {
                         href={po.link || "#"}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="flex items-center justify-between rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2.5 transition-colors hover:bg-white/[0.06]"
+                        className="flex items-center justify-between rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2.5 transition-colors hover:bg-white/[0.06] focus:outline-none focus:ring-2 focus:ring-indigo-500/30 active:bg-white/[0.08]"
                       >
                         <div>
                           <div className={`text-xs font-medium ${po.displayColor}`}>

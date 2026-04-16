@@ -14,9 +14,12 @@ interface SessionState {
   ideas: DomainIdea[] | null;
   results: DomainResult[] | null;
   checkedAt: string | null;
+  colorPalette: string[] | null;
+  logos: string[] | null;
   setBrief: (b: Brief) => void;
   setIdeas: (ideas: DomainIdea[]) => void;
   setResults: (results: DomainResult[], checkedAt: string) => void;
+  setGenerationExtras: (palette: string[], logos: string[]) => void;
   clearSession: () => void;
 }
 
@@ -29,6 +32,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [ideas, setIdeasState] = useState<DomainIdea[] | null>(null);
   const [results, setResultsState] = useState<DomainResult[] | null>(null);
   const [checkedAt, setCheckedAtState] = useState<string | null>(null);
+  const [colorPalette, setColorPaletteState] = useState<string[] | null>(null);
+  const [logos, setLogosState] = useState<string[] | null>(null);
   const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
@@ -40,6 +45,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         if (parsed.ideas) setIdeasState(parsed.ideas);
         if (parsed.results) setResultsState(parsed.results);
         if (parsed.checkedAt) setCheckedAtState(parsed.checkedAt);
+        if (parsed.colorPalette) setColorPaletteState(parsed.colorPalette);
+        if (parsed.logos) setLogosState(parsed.logos);
       }
     } catch {
       // ignore
@@ -49,9 +56,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!hydrated) return;
-    const payload = JSON.stringify({ brief, ideas, results, checkedAt });
+    const payload = JSON.stringify({ brief, ideas, results, checkedAt, colorPalette, logos });
     localStorage.setItem(STORAGE_KEY, payload);
-  }, [brief, ideas, results, checkedAt, hydrated]);
+  }, [brief, ideas, results, checkedAt, colorPalette, logos, hydrated]);
 
   const setBrief = (b: Brief) => setBriefState(b);
   const setIdeas = (ideas: DomainIdea[]) => setIdeasState(ideas);
@@ -59,11 +66,17 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setResultsState(results);
     setCheckedAtState(checkedAt);
   };
+  const setGenerationExtras = (palette: string[], logos: string[]) => {
+    setColorPaletteState(palette);
+    setLogosState(logos);
+  };
   const clearSession = () => {
     setBriefState(null);
     setIdeasState(null);
     setResultsState(null);
     setCheckedAtState(null);
+    setColorPaletteState(null);
+    setLogosState(null);
     localStorage.removeItem(STORAGE_KEY);
   };
 
@@ -74,9 +87,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         ideas,
         results,
         checkedAt,
+        colorPalette,
+        logos,
         setBrief,
         setIdeas,
         setResults,
+        setGenerationExtras,
         clearSession,
       }}
     >

@@ -34,6 +34,11 @@ export interface DomainResult extends DomainIdea {
   selected?: boolean;
 }
 
+export interface GenerationExtras {
+  colorPalette: string[];
+  logos: string[];
+}
+
 export const TONE_OPTIONS: { value: Tone; label: string }[] = [
   { value: "tech", label: "Tech" },
   { value: "premium", label: "Premium" },

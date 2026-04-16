@@ -118,17 +118,23 @@ class MultiRegistrarChecker:
             unique_prices.append(po)
 
         # Determine overall status by priority
-        # taken is the strongest signal (if any registrar says taken, it's taken)
-        # premium > available > unknown
-        statuses = [r.status for r in successes]
-        if "taken" in statuses:
-            overall_status = "taken"
-        elif "premium" in statuses:
-            overall_status = "premium"
-        elif "available" in statuses:
-            overall_status = "available"
+        # Namecheap is the most reliable source, so use its status if available.
+        # Fallback to general consensus if Namecheap is not in successes.
+        namecheap_result = next(
+            (r for r in successes if r.source.startswith("namecheap")), None
+        )
+        if namecheap_result and namecheap_result.status != "unknown":
+            overall_status = namecheap_result.status
         else:
-            overall_status = "unknown"
+            statuses = [r.status for r in successes]
+            if "taken" in statuses:
+                overall_status = "taken"
+            elif "premium" in statuses:
+                overall_status = "premium"
+            elif "available" in statuses:
+                overall_status = "available"
+            else:
+                overall_status = "unknown"
 
         # Pick best representative price for backward compatibility
         # Prefer available with price, then any with price

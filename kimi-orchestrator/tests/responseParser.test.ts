@@ -13,6 +13,14 @@ describe("parseKimiContent", () => {
           tags: ["tech"],
         },
       ],
+      colorPalette: ["#0F172A", "#6366F1", "#22D3EE", "#F8FAFC", "#94A3B8"],
+      logos: [
+        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="40" fill="#6366F1"/></svg>`,
+        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect x="10" y="10" width="80" height="80" fill="#22D3EE"/></svg>`,
+        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path d="M50 10 L90 90 L10 90 Z" fill="#0F172A"/></svg>`,
+        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="30" fill="#F8FAFC"/></svg>`,
+        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect x="20" y="20" width="60" height="60" fill="#94A3B8"/></svg>`,
+      ],
       meta: { generatedCount: 1, deduplicated: false },
     });
     const result = parseKimiContent(input);
@@ -33,6 +41,8 @@ describe("parseKimiContent", () => {
             tags: ["short"],
           },
         ],
+        colorPalette: ["#0F172A", "#6366F1", "#22D3EE", "#F8FAFC", "#94A3B8"],
+        logos: Array.from({ length: 5 }).map(() => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="40" fill="#6366F1"/></svg>`),
         meta: { generatedCount: 1, deduplicated: false },
       }) +
       '\n```';
@@ -51,6 +61,8 @@ describe("parseKimiContent", () => {
           tags: ["ai"],
         },
       ],
+      colorPalette: ["#0F172A", "#6366F1", "#22D3EE", "#F8FAFC", "#94A3B8"],
+      logos: Array.from({ length: 5 }).map(() => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="40" fill="#6366F1"/></svg>`),
       meta: { generatedCount: 1, deduplicated: false },
     });
     const raw = `Here is the result:\n${json}\nHope that helps!`;
@@ -82,6 +94,8 @@ describe("validateGenerateResponse", () => {
           tags: [],
         },
       ],
+      colorPalette: ["#0F172A", "#6366F1", "#22D3EE", "#F8FAFC", "#94A3B8"],
+      logos: Array.from({ length: 5 }).map(() => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="40" fill="#6366F1"/></svg>`),
       meta: { generatedCount: 2, deduplicated: false },
     };
     const result = validateGenerateResponse(input);

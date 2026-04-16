@@ -1,5 +1,4 @@
-import { Router, type Request, type Response, type NextFunction } from "express";
-import { z } from "zod";
+import { Router } from "express";
 import {
   BriefSchema,
   CheckRequestSchema,
@@ -93,6 +92,8 @@ router.post("/check", async (req, res, next) => {
           }),
           checkedAt: availability.checkedAt,
           totalChecks: availability.totalChecks,
+          colorPalette: cached.colorPalette,
+          logos: cached.logos,
         };
         res.json(merged);
         return;

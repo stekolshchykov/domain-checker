@@ -18,6 +18,8 @@ const DomainIdeaSchema = z.object({
 
 const GenerateResponseSchema = z.object({
   domains: z.array(DomainIdeaSchema).min(1).max(100),
+  colorPalette: z.array(z.string().regex(/^#[0-9A-Fa-f]{6}$/)).length(5),
+  logos: z.array(z.string().min(50).max(50000)).length(5),
   meta: z.object({
     generatedCount: z.number().int().min(0),
     deduplicated: z.boolean(),
@@ -64,8 +66,18 @@ export function validateGenerateResponse(parsed: unknown): GenerateResponse {
     return true;
   });
 
+  const cleanSvgs = result.data.logos.map((svg) => {
+    let s = svg.trim();
+    if (s.startsWith("```html")) s = s.replace(/^```html\s*/, "").replace(/\s*```$/, "");
+    if (s.startsWith("```svg")) s = s.replace(/^```svg\s*/, "").replace(/\s*```$/, "");
+    if (s.startsWith("```")) s = s.replace(/^```\s*/, "").replace(/\s*```$/, "");
+    return s;
+  });
+
   return {
     domains: uniqueDomains,
+    colorPalette: result.data.colorPalette,
+    logos: cleanSvgs,
     meta: {
       generatedCount: uniqueDomains.length,
       deduplicated: uniqueDomains.length !== result.data.domains.length,

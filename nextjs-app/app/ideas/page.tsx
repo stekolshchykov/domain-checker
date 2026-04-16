@@ -15,12 +15,13 @@ import {
 import { Button } from "@/components/ui/Button";
 import { useSession } from "@/components/SessionProvider";
 import { checkDomainAvailability } from "@/lib/actions";
+import { Pill } from "@/components/ui/Pill";
 import { Stepper } from "@/components/Stepper";
 import type { DomainIdea } from "@/lib/types";
 
 export default function IdeasPage() {
   const router = useRouter();
-  const { brief, ideas, setIdeas, setResults } = useSession();
+  const { brief, ideas, setIdeas, setResults, setGenerationExtras } = useSession();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<"all" | "short" | "premium" | "tech" | "playful">("all");
   const [checking, setChecking] = useState(false);
@@ -66,6 +67,9 @@ export default function IdeasPage() {
     try {
       const res = await checkDomainAvailability(domains, brief, ideas);
       setResults(res.results, res.checkedAt);
+      if (res.colorPalette && res.logos) {
+        setGenerationExtras(res.colorPalette, res.logos);
+      }
       router.push("/results");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Check failed");
@@ -122,17 +126,14 @@ export default function IdeasPage() {
             { key: "tech", label: "Tech" },
             { key: "playful", label: "Playful" },
           ].map((f) => (
-            <button
+            <Pill
               key={f.key}
+              selected={filter === f.key}
               onClick={() => setFilter(f.key as any)}
-              className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
-                filter === f.key
-                  ? "bg-indigo-500/20 text-indigo-200"
-                  : "bg-white/5 text-white/60 hover:bg-white/10"
-              }`}
+              className="px-3 py-1.5 text-xs"
             >
               {f.label}
-            </button>
+            </Pill>
           ))}
         </div>
 

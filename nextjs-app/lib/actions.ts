@@ -6,6 +6,8 @@ const ORCHESTRATOR_URL = process.env.KIMI_ORCHESTRATOR_URL || "http://localhost:
 
 interface GenerateApiResponse {
   domains: DomainIdea[];
+  colorPalette: string[];
+  logos: string[];
   meta: { generatedCount: number; deduplicated: boolean };
 }
 
@@ -13,6 +15,8 @@ interface CheckApiResponse {
   results: DomainResult[];
   checkedAt: string;
   totalChecks: number;
+  colorPalette?: string[];
+  logos?: string[];
 }
 
 export async function generateDomainIdeas(brief: Brief): Promise<GenerateApiResponse> {

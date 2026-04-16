@@ -16,7 +16,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
         )}
         <input
           ref={ref}
-          className="w-full rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3 text-white placeholder:text-white/30 transition-colors hover:border-white/20 focus:border-white/30 focus:bg-white/[0.05] focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+          className="w-full rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3 text-white placeholder:text-white/30 transition-colors hover:border-white/20 focus:border-white/30 focus:bg-white/[0.05] focus:outline-none focus:ring-2 focus:ring-indigo-500/30 disabled:cursor-not-allowed disabled:opacity-50 disabled:bg-white/[0.02] disabled:border-white/5"
           {...props}
         />
         {error && <span className="text-sm text-rose-400">{error}</span>}

@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { TextArea } from "@/components/ui/TextArea";
 import { Chip } from "@/components/ui/Chip";
+import { ToggleButton } from "@/components/ui/ToggleButton";
 import { useSession } from "@/components/SessionProvider";
 import { TONE_OPTIONS, TLD_OPTIONS, type Tone } from "@/lib/types";
 import { Stepper } from "@/components/Stepper";
@@ -195,18 +196,13 @@ export default function BriefPage() {
                     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                       {(["short", "medium", "long", "any"] as const).map(
                         (len) => (
-                          <button
+                          <ToggleButton
                             key={len}
-                            type="button"
+                            selected={lengthPreference === len}
                             onClick={() => setLengthPreference(len)}
-                            className={`rounded-xl border px-4 py-3 text-sm font-medium capitalize transition-all ${
-                              lengthPreference === len
-                                ? "border-indigo-400/60 bg-indigo-500/15 text-indigo-100"
-                                : "border-white/10 bg-white/[0.03] text-white/70 hover:border-white/20"
-                            }`}
                           >
                             {len}
-                          </button>
+                          </ToggleButton>
                         )
                       )}
                     </div>

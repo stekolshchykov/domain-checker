@@ -80,6 +80,9 @@ async function callKimi(messages: KimiMessage[], attempt: number): Promise<KimiR
   }
 }
 
+const MOCK_PALETTE = ["#0F172A", "#6366F1", "#22D3EE", "#F8FAFC", "#94A3B8"];
+const MOCK_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="40" fill="#6366F1"/></svg>`;
+
 const MOCK_DOMAINS: GenerateResponse = {
   domains: Array.from({ length: 12 }).map((_, i) => ({
     domainName: `novaforge${i === 0 ? "" : i}.com`,
@@ -88,6 +91,8 @@ const MOCK_DOMAINS: GenerateResponse = {
     tone: "modern premium",
     tags: ["tech", "brandable", "strong", "global"],
   })),
+  colorPalette: MOCK_PALETTE,
+  logos: Array.from({ length: 5 }).map(() => MOCK_SVG),
   meta: { generatedCount: 12, deduplicated: true },
 };
 
@@ -99,6 +104,8 @@ export async function generateDomains(brief: Brief): Promise<GenerateResponse> {
         ...d,
         domainName: `${brief.projectDescription.slice(0, 6).replace(/\s+/g, "").toLowerCase() || "brand"}${i}.com`,
       })),
+      colorPalette: MOCK_PALETTE,
+      logos: Array.from({ length: 5 }).map(() => MOCK_SVG),
       meta: { generatedCount: 12, deduplicated: true },
     };
   }
