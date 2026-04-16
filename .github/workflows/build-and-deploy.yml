@@ -38,6 +38,8 @@ jobs:
 
       - name: Install domain-service deps and test
         working-directory: ./domain-service
+        env:
+          TEST_BASE_URL: http://test
         run: |
           pip install -e ".[dev]"
           PYTHONPATH=src pytest -v tests/
