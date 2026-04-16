@@ -17,7 +17,7 @@ class NamecheapAdapter(RegistrarAdapter):
         self._playwright = None
         self._browser: Optional[Browser] = None
         self._page: Optional[Page] = None
-        self._lock = asyncio.Lock()
+        self._semaphore = asyncio.Semaphore(3)
         self._last_request_at = 0.0
         self._client = httpx.AsyncClient(timeout=10.0)
 
@@ -60,7 +60,7 @@ class NamecheapAdapter(RegistrarAdapter):
         self._last_request_at = time.monotonic()
 
     async def check_domain(self, domain: str) -> DomainCheckResult:
-        async with self._lock:
+        async with self._semaphore:
             page = await self._ensure_page()
             await self._throttle()
             return await self._check_single(page, domain.strip().lower())
@@ -72,15 +72,19 @@ class NamecheapAdapter(RegistrarAdapter):
         url = f"https://www.namecheap.com/domains/registration/results/?domain={domain}"
         link = self._build_link(domain)
         try:
-            await page.goto(url, wait_until="networkidle", timeout=settings.page_timeout_ms)
-            await asyncio.sleep(2)
+            await page.goto(url, wait_until="domcontentloaded", timeout=settings.page_timeout_ms)
+
+            # Wait for the domain heading to appear (core content)
+            try:
+                await page.locator('article h2').filter(has_text=domain).first.wait_for(timeout=5000)
+            except Exception:
+                pass
 
             # Try to close cookie dialog if present
             try:
                 close_btn = page.locator('button:has-text("Close")').first
-                if await close_btn.is_visible(timeout=2000):
+                if await close_btn.is_visible(timeout=500):
                     await close_btn.click()
-                    await asyncio.sleep(0.5)
             except Exception:
                 pass
 

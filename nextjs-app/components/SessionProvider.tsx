@@ -2,9 +2,10 @@
 
 import {
   createContext,
+  useCallback,
   useContext,
-  useEffect,
-  useState,
+  useMemo,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import type { Brief, DomainIdea, DomainResult } from "@/lib/types";
@@ -16,6 +17,7 @@ interface SessionState {
   checkedAt: string | null;
   colorPalette: string[] | null;
   logos: string[] | null;
+  hydrated: boolean;
   setBrief: (b: Brief) => void;
   setIdeas: (ideas: DomainIdea[]) => void;
   setResults: (results: DomainResult[], checkedAt: string) => void;
@@ -23,81 +25,115 @@ interface SessionState {
   clearSession: () => void;
 }
 
-const SessionContext = createContext<SessionState | null>(null);
-
 const STORAGE_KEY = "nomen-session-v1";
 
-export function SessionProvider({ children }: { children: ReactNode }) {
-  const [brief, setBriefState] = useState<Brief | null>(null);
-  const [ideas, setIdeasState] = useState<DomainIdea[] | null>(null);
-  const [results, setResultsState] = useState<DomainResult[] | null>(null);
-  const [checkedAt, setCheckedAtState] = useState<string | null>(null);
-  const [colorPalette, setColorPaletteState] = useState<string[] | null>(null);
-  const [logos, setLogosState] = useState<string[] | null>(null);
-  const [hydrated, setHydrated] = useState(false);
+const SessionContext = createContext<SessionState | null>(null);
 
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (parsed.brief) setBriefState(parsed.brief);
-        if (parsed.ideas) setIdeasState(parsed.ideas);
-        if (parsed.results) setResultsState(parsed.results);
-        if (parsed.checkedAt) setCheckedAtState(parsed.checkedAt);
-        if (parsed.colorPalette) setColorPaletteState(parsed.colorPalette);
-        if (parsed.logos) setLogosState(parsed.logos);
-      }
-    } catch {
-      // ignore
-    }
-    setHydrated(true);
+function getSnapshot(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return localStorage.getItem(STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function getServerSnapshot(): null {
+  return null;
+}
+
+function subscribe(callback: () => void) {
+  if (typeof window === "undefined") return () => {};
+  const handler = () => callback();
+  window.addEventListener("storage", handler);
+  return () => window.removeEventListener("storage", handler);
+}
+
+function parseSession(raw: string | null) {
+  if (!raw) {
+    return {
+      brief: null,
+      ideas: null,
+      results: null,
+      checkedAt: null,
+      colorPalette: null,
+      logos: null,
+    };
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return {
+      brief: parsed.brief ?? null,
+      ideas: parsed.ideas ?? null,
+      results: parsed.results ?? null,
+      checkedAt: parsed.checkedAt ?? null,
+      colorPalette: parsed.colorPalette ?? null,
+      logos: parsed.logos ?? null,
+    };
+  } catch {
+    return {
+      brief: null,
+      ideas: null,
+      results: null,
+      checkedAt: null,
+      colorPalette: null,
+      logos: null,
+    };
+  }
+}
+
+export function SessionProvider({ children }: { children: ReactNode }) {
+  const raw = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  const session = useMemo(() => parseSession(raw), [raw]);
+
+  const persist = useCallback((next: Partial<ReturnType<typeof parseSession>>) => {
+    if (typeof window === "undefined") return;
+    const current = parseSession(localStorage.getItem(STORAGE_KEY));
+    const updated = { ...current, ...next };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+    // Dispatch a synthetic storage event so other tabs and the store subscription update
+    window.dispatchEvent(new StorageEvent("storage", { key: STORAGE_KEY }));
   }, []);
 
-  useEffect(() => {
-    if (!hydrated) return;
-    const payload = JSON.stringify({ brief, ideas, results, checkedAt, colorPalette, logos });
-    localStorage.setItem(STORAGE_KEY, payload);
-  }, [brief, ideas, results, checkedAt, colorPalette, logos, hydrated]);
-
-  const setBrief = (b: Brief) => setBriefState(b);
-  const setIdeas = (ideas: DomainIdea[]) => setIdeasState(ideas);
-  const setResults = (results: DomainResult[], checkedAt: string) => {
-    setResultsState(results);
-    setCheckedAtState(checkedAt);
-  };
-  const setGenerationExtras = (palette: string[], logos: string[]) => {
-    setColorPaletteState(palette);
-    setLogosState(logos);
-  };
-  const clearSession = () => {
-    setBriefState(null);
-    setIdeasState(null);
-    setResultsState(null);
-    setCheckedAtState(null);
-    setColorPaletteState(null);
-    setLogosState(null);
+  const setBrief = useCallback(
+    (b: Brief) => persist({ brief: b }),
+    [persist]
+  );
+  const setIdeas = useCallback(
+    (ideas: DomainIdea[]) => persist({ ideas }),
+    [persist]
+  );
+  const setResults = useCallback(
+    (results: DomainResult[], checkedAt: string) =>
+      persist({ results, checkedAt }),
+    [persist]
+  );
+  const setGenerationExtras = useCallback(
+    (colorPalette: string[], logos: string[]) =>
+      persist({ colorPalette, logos }),
+    [persist]
+  );
+  const clearSession = useCallback(() => {
+    if (typeof window === "undefined") return;
     localStorage.removeItem(STORAGE_KEY);
-  };
+    window.dispatchEvent(new StorageEvent("storage", { key: STORAGE_KEY }));
+  }, []);
+
+  const value = useMemo(
+    () => ({
+      ...session,
+      hydrated: typeof window !== "undefined",
+      setBrief,
+      setIdeas,
+      setResults,
+      setGenerationExtras,
+      clearSession,
+    }),
+    [session, setBrief, setIdeas, setResults, setGenerationExtras, clearSession]
+  );
 
   return (
-    <SessionContext.Provider
-      value={{
-        brief,
-        ideas,
-        results,
-        checkedAt,
-        colorPalette,
-        logos,
-        setBrief,
-        setIdeas,
-        setResults,
-        setGenerationExtras,
-        clearSession,
-      }}
-    >
-      {children}
-    </SessionContext.Provider>
+    <SessionContext.Provider value={value}>{children}</SessionContext.Provider>
   );
 }
 

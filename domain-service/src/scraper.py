@@ -10,7 +10,7 @@ from src.adapters.namecheap import NamecheapAdapter
 class MultiRegistrarChecker:
     """Checks domain availability across multiple registrars in parallel."""
 
-    def __init__(self):
+    def __init__(self, max_concurrent_domains: int = 4):
         self._adapters: List[RegistrarAdapter] = []
         self._namecheap: Optional[NamecheapAdapter] = None
         for adapter_cls in DEFAULT_ADAPTERS:
@@ -18,6 +18,7 @@ class MultiRegistrarChecker:
             self._adapters.append(adapter)
             if isinstance(adapter, NamecheapAdapter):
                 self._namecheap = adapter
+        self._domain_semaphore = asyncio.Semaphore(max_concurrent_domains)
 
     async def start(self) -> None:
         if self._namecheap:
@@ -35,11 +36,16 @@ class MultiRegistrarChecker:
                     pass
 
     async def check_domains(self, domains: List[str]) -> List[DomainCheckResult]:
-        results = []
-        for domain in domains:
-            result = await self._check_domain_parallel(domain.strip().lower())
-            results.append(result)
-        return results
+        tasks = [
+            self._check_domain_with_limit(d.strip().lower())
+            for d in domains
+        ]
+        results = await asyncio.gather(*tasks)
+        return list(results)
+
+    async def _check_domain_with_limit(self, domain: str) -> DomainCheckResult:
+        async with self._domain_semaphore:
+            return await self._check_domain_parallel(domain)
 
     async def _check_domain_parallel(self, domain: str) -> DomainCheckResult:
         """Run all adapters concurrently and aggregate their results."""

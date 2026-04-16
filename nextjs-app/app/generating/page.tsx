@@ -19,44 +19,48 @@ const STEPS = [
 
 export default function GeneratingPage() {
   const router = useRouter();
-  const { brief, setIdeas, setGenerationExtras } = useSession();
+  const { brief, setIdeas, setGenerationExtras, hydrated } = useSession();
   const [progress, setProgress] = useState(10);
   const [stepIndex, setStepIndex] = useState(0);
   const [error, setError] = useState("");
 
   useEffect(() => {
+    if (!hydrated) return;
     if (!brief) {
       router.replace("/");
       return;
     }
 
-    let mounted = true;
+    let isActive = true;
 
     async function run() {
       if (!brief) return;
       try {
         const timers: NodeJS.Timeout[] = [];
-        timers.push(setTimeout(() => mounted && setProgress(25), 400));
-        timers.push(setTimeout(() => mounted && setStepIndex(1), 1200));
-        timers.push(setTimeout(() => mounted && setProgress(50), 1600));
-        timers.push(setTimeout(() => mounted && setStepIndex(2), 3000));
-        timers.push(setTimeout(() => mounted && setProgress(75), 3600));
-        timers.push(setTimeout(() => mounted && setStepIndex(3), 5000));
+        timers.push(setTimeout(() => isActive && setProgress(25), 200));
+        timers.push(setTimeout(() => isActive && setStepIndex(1), 600));
+        timers.push(setTimeout(() => isActive && setProgress(50), 800));
+        timers.push(setTimeout(() => isActive && setStepIndex(2), 1500));
+        timers.push(setTimeout(() => isActive && setProgress(75), 1800));
+        timers.push(setTimeout(() => isActive && setStepIndex(3), 2500));
 
         const result = await generateDomainIdeas(brief);
 
-        if (!mounted) return;
+        if (!isActive) return;
+        // Clear pending animation timers so we transition immediately
+        timers.forEach(clearTimeout);
         setProgress(100);
+        setStepIndex(3);
         setIdeas(result.domains);
         setGenerationExtras(result.colorPalette, result.logos);
 
         timers.push(
           setTimeout(() => {
-            if (mounted) router.push("/ideas");
-          }, 800)
+            if (isActive) router.push("/ideas");
+          }, 400)
         );
       } catch (err) {
-        if (!mounted) return;
+        if (!isActive) return;
         setError(err instanceof Error ? err.message : "Something went wrong");
       }
     }
@@ -64,9 +68,11 @@ export default function GeneratingPage() {
     run();
 
     return () => {
-      mounted = false;
+      isActive = false;
     };
-  }, [brief, router, setIdeas]);
+  }, [brief, router, setIdeas, setGenerationExtras, hydrated]);
+
+  if (!hydrated) return null;
 
   if (error) {
     return (

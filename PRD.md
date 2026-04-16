@@ -273,7 +273,7 @@ services:
     environment:
       - APP_ENV=production
       - PLAYWRIGHT_HEADLESS=true
-      - RATE_LIMIT_SECONDS=5.0
+      - RATE_LIMIT_SECONDS=1.0
 
   kimi-orchestrator:
     build: ./kimi-orchestrator
@@ -371,7 +371,7 @@ domain-checker/
 | Kimi API latency (30–90s) | Progress UI with clear messaging; 180s timeout |
 | Kimi Code API auth quirks | Documented endpoint + mandatory `User-Agent` header |
 | Rate limiting on domain checks | 5-second delay enforced globally in scraper |
-| Large batch checks | Sequential processing with shared lock |
+| Large batch checks | Semaphore-based parallel processing (up to 4 domains concurrently) |
 
 ---
 
@@ -381,7 +381,7 @@ domain-checker/
 - [ ] Export results (CSV, PDF)
 - [ ] Compare TLD pricing side-by-side
 - [ ] Regenerate from favorites
-- [ ] Logo / slogan generation expansion
+- [x] Logo / color palette generation expansion (implemented in results page)
 - [ ] Redis caching for Namecheap results
 
 ---

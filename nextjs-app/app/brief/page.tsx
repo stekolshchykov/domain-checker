@@ -18,13 +18,8 @@ const STEP_TITLES = ["Project & Audience", "Tone & Style", "Keywords & TLDs"];
 
 export default function BriefPage() {
   const router = useRouter();
-  const { brief, setBrief } = useSession();
+  const { brief, setBrief, hydrated } = useSession();
   const [step, setStep] = useState(0);
-
-  // Redirect if no initial description
-  useEffect(() => {
-    if (!brief) router.replace("/");
-  }, [brief, router]);
 
   const [projectDescription, setProjectDescription] = useState(brief?.projectDescription || "");
   const [audience, setAudience] = useState(brief?.audience || "");
@@ -33,6 +28,12 @@ export default function BriefPage() {
   const [keywords, setKeywords] = useState(brief?.keywords?.join(", ") || "");
   const [exclusions, setExclusions] = useState(brief?.exclusions?.join(", ") || "");
   const [tlds, setTlds] = useState<string[]>(brief?.tlds || [".com", ".io"]);
+
+  useEffect(() => {
+    if (hydrated && !brief) {
+      router.replace("/");
+    }
+  }, [brief, router, hydrated]);
 
   const toggleTone = (t: Tone) => {
     setTone((prev) =>
@@ -77,6 +78,8 @@ export default function BriefPage() {
   };
 
   const StepIcon = STEP_ICONS[step];
+
+  if (!hydrated) return null;
 
   return (
     <main className="flex flex-1 flex-col items-center px-6 py-10">

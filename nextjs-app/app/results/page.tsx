@@ -54,14 +54,15 @@ function formatRegistrar(po: PriceOption) {
 
 export default function ResultsPage() {
   const router = useRouter();
-  const { results, checkedAt, colorPalette, logos, clearSession } = useSession();
+  const { results, checkedAt, colorPalette, logos, clearSession, hydrated } = useSession();
   const [sort, setSort] = useState<SortMode>("available");
 
   useEffect(() => {
+    if (!hydrated) return;
     if (!results || results.length === 0) {
       router.replace("/");
     }
-  }, [results, router]);
+  }, [results, router, hydrated]);
 
   const sorted = useMemo(() => {
     if (!results) return [];
@@ -106,6 +107,7 @@ export default function ResultsPage() {
     [sorted]
   );
 
+  if (!hydrated) return null;
   if (!results) return null;
 
   return (

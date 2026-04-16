@@ -1,3 +1,4 @@
+import asyncio
 import json
 from typing import Optional
 
@@ -28,7 +29,6 @@ class GoDaddyAdapter(RegistrarAdapter):
     async def check_domain(self, domain: str) -> DomainCheckResult:
         link = self._build_link(domain)
         try:
-            # Try the public domainfind API first
             parts = domain.rsplit(".", 1)
             if len(parts) != 2:
                 return DomainCheckResult(
@@ -39,10 +39,19 @@ class GoDaddyAdapter(RegistrarAdapter):
                     prices=[],
                 )
             sld, tld = parts
-            url = f"https://www.godaddy.com/domainfind/v1/search/exact?q={sld}&tld={tld}"
-            resp = await self._client.get(url)
-            if resp.status_code == 200:
-                data = resp.json()
+            api_url = f"https://www.godaddy.com/domainfind/v1/search/exact?q={sld}&tld={tld}"
+            fallback_url = (
+                f"https://www.godaddy.com/en/domainsearch/find"
+                f"?checkAvail=1&domainToCheck={domain}"
+            )
+
+            # Run API and fallback requests in parallel for speed
+            api_task = self._client.get(api_url)
+            fallback_task = self._client.get(fallback_url)
+            api_resp, fallback_resp = await asyncio.gather(api_task, fallback_task)
+
+            if api_resp.status_code == 200:
+                data = api_resp.json()
                 exact = data.get("ExactMatchDomain") or {}
                 is_available = exact.get("IsAvailable")
                 price_info = exact.get("Price") or exact.get("PriceInfo")
@@ -71,13 +80,7 @@ class GoDaddyAdapter(RegistrarAdapter):
                         prices=[PriceOption(source="godaddy", price=price, currency=currency, link=link)],
                     )
 
-            # Fallback: try the search page HTML for quick hints
-            search_url = (
-                f"https://www.godaddy.com/en/domainsearch/find"
-                f"?checkAvail=1&domainToCheck={domain}"
-            )
-            html_resp = await self._client.get(search_url)
-            text = html_resp.text.lower()
+            text = fallback_resp.text.lower()
             if '"isavailable":true' in text or '"available":true' in text:
                 return DomainCheckResult(
                     domain=domain,

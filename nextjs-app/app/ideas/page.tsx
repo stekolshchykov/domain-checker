@@ -21,19 +21,20 @@ import type { DomainIdea } from "@/lib/types";
 
 export default function IdeasPage() {
   const router = useRouter();
-  const { brief, ideas, setIdeas, setResults, setGenerationExtras } = useSession();
+  const { brief, ideas, setResults, setGenerationExtras, hydrated } = useSession();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<"all" | "short" | "premium" | "tech" | "playful">("all");
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
+    if (!hydrated) return;
     if (!ideas || ideas.length === 0) {
       router.replace("/");
       return;
     }
     setSelected(new Set(ideas.map((i) => i.domainName)));
-  }, [ideas, router]);
+  }, [ideas, router, hydrated]);
 
   const filteredIdeas = useMemo(() => {
     if (!ideas) return [];
@@ -77,6 +78,7 @@ export default function IdeasPage() {
     }
   };
 
+  if (!hydrated) return null;
   if (!ideas) return null;
 
   const visibleSelectedCount = filteredIdeas.filter((i) => selected.has(i.domainName)).length;
