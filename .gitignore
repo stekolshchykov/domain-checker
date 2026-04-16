@@ -16,7 +16,7 @@ Thumbs.db
 
 # Node.js (all nested projects)
 **/node_modules/
-**/package-lock.json
+/package-lock.json
 **/yarn.lock
 **/pnpm-lock.yaml
 
