@@ -39,6 +39,15 @@ export const CheckRequestSchema = z.object({
 
 export type CheckRequest = z.infer<typeof CheckRequestSchema>;
 
+export const PriceOptionSchema = z.object({
+  source: z.string(),
+  price: z.string().nullable().optional(),
+  currency: z.string().nullable().optional(),
+  link: z.string().nullable().optional(),
+});
+
+export type PriceOption = z.infer<typeof PriceOptionSchema>;
+
 export const DomainStatusSchema = z.object({
   domain: z.string(),
   status: z.enum(["available", "taken", "premium", "unknown"]),
@@ -46,6 +55,7 @@ export const DomainStatusSchema = z.object({
   currency: z.string().nullable().optional(),
   source: z.string().optional(),
   detail: z.string().nullable().optional(),
+  prices: z.array(PriceOptionSchema).optional(),
 });
 
 export type DomainStatus = z.infer<typeof DomainStatusSchema>;

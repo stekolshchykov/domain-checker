@@ -12,13 +12,33 @@ import {
   Crown,
   TrendingUp,
   Minimize2,
+  ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { useSession } from "@/components/SessionProvider";
 import { Stepper } from "@/components/Stepper";
-import type { DomainResult } from "@/lib/types";
+import type { DomainResult, PriceOption } from "@/lib/types";
 
 type SortMode = "available" | "price" | "brand" | "short";
+
+const REGISTRAR_META: Record<string, { label: string; color: string }> = {
+  namecheap: { label: "Namecheap", color: "text-indigo-300" },
+  godaddy: { label: "GoDaddy", color: "text-emerald-300" },
+  letshost: { label: "LetsHost", color: "text-amber-300" },
+  cloudflare: { label: "Cloudflare", color: "text-orange-300" },
+};
+
+function formatRegistrar(po: PriceOption) {
+  const meta = REGISTRAR_META[po.source] || {
+    label: po.source.charAt(0).toUpperCase() + po.source.slice(1),
+    color: "text-white/70",
+  };
+  return {
+    ...po,
+    displayName: meta.label,
+    displayColor: meta.color,
+  };
+}
 
 export default function ResultsPage() {
   const router = useRouter();
@@ -84,7 +104,7 @@ export default function ResultsPage() {
         </div>
 
         <div className="mb-2 text-sm text-white/60">
-          Step 4 of 4 · Availability checked live via Namecheap
+          Step 4 of 4 · Availability checked across multiple registrars
         </div>
 
         <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
@@ -147,17 +167,20 @@ export default function ResultsPage() {
               <span className="font-semibold">Great news</span>
             </div>
             <p className="mt-1 text-emerald-100/80">
-              We found {availableCount} available domain{availableCount > 1 ? "s" : ""} that match your brief. Snap it up before someone else does.
+              We found {availableCount} available domain{availableCount > 1 ? "s" : ""} that match your brief. Compare prices across registrars and grab the best deal.
             </p>
           </motion.div>
         )}
 
         {/* Results list */}
-        <div className="space-y-3">
+        <div className="space-y-4">
           {sorted.map((result, idx) => {
             const isAvailable = result.status === "available";
             const isPremium = result.status === "premium";
             const isTaken = result.status === "taken";
+            const prices = (result.prices || [])
+              .filter((p) => p.link || p.price)
+              .map(formatRegistrar);
 
             return (
               <motion.div
@@ -166,7 +189,7 @@ export default function ResultsPage() {
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: idx * 0.03 }}
                 className={`
-                  flex flex-col gap-3 rounded-2xl border px-5 py-4 transition-colors sm:flex-row sm:items-center sm:justify-between
+                  rounded-2xl border px-5 py-4 transition-colors
                   ${
                     isAvailable
                       ? "border-emerald-500/20 bg-emerald-500/[0.06]"
@@ -176,56 +199,57 @@ export default function ResultsPage() {
                   }
                 `}
               >
-                <div className="flex-1">
-                  <div className="mb-1 flex items-center gap-2">
-                    <h3 className="text-lg font-semibold text-white">
-                      {result.domain}
-                    </h3>
-                    {isAvailable && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/20 px-2 py-0.5 text-xs font-medium text-emerald-300">
-                        <CheckCircle2 className="h-3 w-3" />
-                        Available
-                      </span>
+                <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <div className="mb-1 flex items-center gap-2">
+                      <h3 className="text-lg font-semibold text-white">
+                        {result.domain}
+                      </h3>
+                      {isAvailable && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/20 px-2 py-0.5 text-xs font-medium text-emerald-300">
+                          <CheckCircle2 className="h-3 w-3" />
+                          Available
+                        </span>
+                      )}
+                      {isPremium && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/20 px-2 py-0.5 text-xs font-medium text-amber-300">
+                          <Crown className="h-3 w-3" />
+                          Premium
+                        </span>
+                      )}
+                      {isTaken && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-rose-500/20 px-2 py-0.5 text-xs font-medium text-rose-300">
+                          <XCircle className="h-3 w-3" />
+                          Taken
+                        </span>
+                      )}
+                      {!isAvailable && !isPremium && !isTaken && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-white/10 px-2 py-0.5 text-xs font-medium text-white/60">
+                          <AlertCircle className="h-3 w-3" />
+                          Unknown
+                        </span>
+                      )}
+                    </div>
+                    {result.meaning && (
+                      <p className="text-sm text-white/60">{result.meaning}</p>
                     )}
-                    {isPremium && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/20 px-2 py-0.5 text-xs font-medium text-amber-300">
-                        <Crown className="h-3 w-3" />
-                        Premium
-                      </span>
-                    )}
-                    {isTaken && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-rose-500/20 px-2 py-0.5 text-xs font-medium text-rose-300">
-                        <XCircle className="h-3 w-3" />
-                        Taken
-                      </span>
-                    )}
-                    {!isAvailable && !isPremium && !isTaken && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-white/10 px-2 py-0.5 text-xs font-medium text-white/60">
-                        <AlertCircle className="h-3 w-3" />
-                        Unknown
-                      </span>
+                    {result.tags && result.tags.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {result.tags.slice(0, 5).map((tag) => (
+                          <span
+                            key={tag}
+                            className="rounded-full bg-white/5 px-2 py-0.5 text-[11px] text-white/50"
+                          >
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
                     )}
                   </div>
-                  {result.meaning && (
-                    <p className="text-sm text-white/60">{result.meaning}</p>
-                  )}
-                  {result.tags && result.tags.length > 0 && (
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      {result.tags.slice(0, 5).map((tag) => (
-                        <span
-                          key={tag}
-                          className="rounded-full bg-white/5 px-2 py-0.5 text-[11px] text-white/50"
-                        >
-                          {tag}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
 
-                <div className="flex items-center gap-4 sm:text-right">
-                  {result.price ? (
-                    <div>
+                  {/* Legacy single price fallback */}
+                  {!prices.length && result.price && (
+                    <div className="text-right">
                       <div className="text-lg font-semibold text-white">
                         {result.price}
                       </div>
@@ -233,12 +257,37 @@ export default function ResultsPage() {
                         {result.currency || ""}
                       </div>
                     </div>
-                  ) : (
-                    <div className="text-sm text-white/40">
-                      {isAvailable ? "Standard price" : "—"}
-                    </div>
                   )}
                 </div>
+
+                {/* Registrar price grid */}
+                {prices.length > 0 && (
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                    {prices.map((po) => (
+                      <a
+                        key={po.source}
+                        href={po.link || "#"}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center justify-between rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2.5 transition-colors hover:bg-white/[0.06]"
+                      >
+                        <div>
+                          <div className={`text-xs font-medium ${po.displayColor}`}>
+                            {po.displayName}
+                          </div>
+                          <div className="text-sm font-semibold text-white">
+                            {po.price || (
+                              <span className="text-white/40">Check price</span>
+                            )}
+                          </div>
+                        </div>
+                        {po.link && (
+                          <ExternalLink className="h-4 w-4 text-white/30" />
+                        )}
+                      </a>
+                    ))}
+                  </div>
+                )}
               </motion.div>
             );
           })}

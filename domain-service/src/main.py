@@ -9,9 +9,9 @@ from fastapi.exceptions import RequestValidationError
 from src.config import settings
 from src.exceptions import BrowserNotReadyError, DomainCheckError, NamecheapUnavailableError, RateLimitExceeded
 from src.models import CheckRequest, CheckResponse, DomainCheckResult, ErrorDetail, ErrorResponse, HealthResponse
-from src.scraper import RateLimitedScraper
+from src.scraper import MultiRegistrarChecker
 
-scraper = RateLimitedScraper()
+scraper = MultiRegistrarChecker()
 
 
 @asynccontextmanager

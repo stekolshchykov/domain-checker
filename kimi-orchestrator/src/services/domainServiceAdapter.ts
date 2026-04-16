@@ -61,6 +61,13 @@ export async function healthCheck(): Promise<{ status: string; browser_ready: bo
 }
 
 function validateCheckResponse(data: unknown): CheckResponse {
+  const PriceOptionSchema = z.object({
+    source: z.string(),
+    price: z.string().nullable().optional(),
+    currency: z.string().nullable().optional(),
+    link: z.string().nullable().optional(),
+  });
+
   const DomainStatusSchema = z.object({
     domain: z.string(),
     status: z.enum(["available", "taken", "premium", "unknown"]),
@@ -68,6 +75,7 @@ function validateCheckResponse(data: unknown): CheckResponse {
     currency: z.string().nullable().optional(),
     source: z.string().optional(),
     detail: z.string().nullable().optional(),
+    prices: z.array(PriceOptionSchema).optional(),
   });
 
   const schema = z.object({

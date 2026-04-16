@@ -8,6 +8,13 @@ DOMAIN_RE = re.compile(
 )
 
 
+class PriceOption(BaseModel):
+    source: str
+    price: Optional[str] = None
+    currency: Optional[str] = None
+    link: Optional[str] = None
+
+
 class DomainCheckResult(BaseModel):
     domain: str
     status: str = Field(..., pattern="^(available|taken|premium|unknown)$")
@@ -15,6 +22,7 @@ class DomainCheckResult(BaseModel):
     currency: Optional[str] = None
     source: str = Field(default="unknown")
     detail: Optional[str] = None
+    prices: List[PriceOption] = Field(default_factory=list)
 
 
 class CheckRequest(BaseModel):

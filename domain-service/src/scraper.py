@@ -1,193 +1,193 @@
 import asyncio
-import time
 from typing import List, Optional
 
-import httpx
-from playwright.async_api import async_playwright, Page, Browser
+from src.models import DomainCheckResult, PriceOption
+from src.adapters import DEFAULT_ADAPTERS
+from src.adapters.base import RegistrarAdapter
+from src.adapters.namecheap import NamecheapAdapter
 
-from src.config import settings
-from src.models import DomainCheckResult
 
+class MultiRegistrarChecker:
+    """Checks domain availability across multiple registrars in parallel."""
 
-class RateLimitedScraper:
     def __init__(self):
-        self._playwright = None
-        self._browser: Optional[Browser] = None
-        self._page: Optional[Page] = None
-        self._lock: Optional[asyncio.Lock] = None
-        self._last_request_at = 0.0
-        self._client = httpx.AsyncClient(timeout=10.0)
-
-    def _get_lock(self) -> asyncio.Lock:
-        if self._lock is None:
-            self._lock = asyncio.Lock()
-        return self._lock
+        self._adapters: List[RegistrarAdapter] = []
+        self._namecheap: Optional[NamecheapAdapter] = None
+        for adapter_cls in DEFAULT_ADAPTERS:
+            adapter = adapter_cls()
+            self._adapters.append(adapter)
+            if isinstance(adapter, NamecheapAdapter):
+                self._namecheap = adapter
 
     async def start(self) -> None:
-        self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.firefox.launch(
-            headless=settings.playwright_headless,
-        )
-        self._last_request_at = 0.0
+        if self._namecheap:
+            await self._namecheap.start()
 
     async def stop(self) -> None:
-        await self._client.aclose()
-        if self._page:
-            await self._page.close()
-            self._page = None
-        if self._browser:
-            await self._browser.close()
-            self._browser = None
-        if self._playwright:
-            await self._playwright.stop()
-            self._playwright = None
-
-    async def _ensure_page(self) -> Page:
-        if self._page is None or self._page.is_closed():
-            context = await self._browser.new_context(
-                viewport={"width": 1920, "height": 1080},
-                locale="en-US",
-                timezone_id="America/New_York",
-            )
-            self._page = await context.new_page()
-        return self._page
-
-    async def _throttle(self) -> None:
-        elapsed = time.monotonic() - self._last_request_at
-        delay = settings.rate_limit_seconds - elapsed
-        if delay > 0:
-            await asyncio.sleep(delay)
-        self._last_request_at = time.monotonic()
+        if self._namecheap:
+            await self._namecheap.stop()
+        # HTTP-based adapters may also hold clients; close them gracefully
+        for adapter in self._adapters:
+            if hasattr(adapter, "_client") and hasattr(adapter._client, "aclose"):
+                try:
+                    await adapter._client.aclose()
+                except Exception:
+                    pass
 
     async def check_domains(self, domains: List[str]) -> List[DomainCheckResult]:
-        async with self._get_lock():
-            results = []
-            page = await self._ensure_page()
-            for domain in domains:
-                await self._throttle()
-                result = await self._check_single(page, domain.strip().lower())
-                results.append(result)
-            return results
+        results = []
+        for domain in domains:
+            result = await self._check_domain_parallel(domain.strip().lower())
+            results.append(result)
+        return results
 
-    async def _check_single(self, page: Page, domain: str) -> DomainCheckResult:
-        url = f"https://www.namecheap.com/domains/registration/results/?domain={domain}"
+    async def _check_domain_parallel(self, domain: str) -> DomainCheckResult:
+        """Run all adapters concurrently and aggregate their results."""
+        tasks = [self._run_adapter(adapter, domain) for adapter in self._adapters]
+        adapter_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        successes: List[DomainCheckResult] = []
+        details: List[str] = []
+
+        for res in adapter_results:
+            if isinstance(res, Exception):
+                details.append(str(res))
+                continue
+            successes.append(res)
+
+        return self._aggregate_results(domain, successes, details)
+
+    async def _run_adapter(self, adapter: RegistrarAdapter, domain: str) -> DomainCheckResult:
+        """Wrap adapter call so exceptions become results rather than breaking gather."""
         try:
-            await page.goto(url, wait_until="networkidle", timeout=settings.page_timeout_ms)
-            await asyncio.sleep(2)
-
-            # Try to close cookie dialog if present
-            try:
-                close_btn = page.locator('button:has-text("Close")').first
-                if await close_btn.is_visible(timeout=2000):
-                    await close_btn.click()
-                    await asyncio.sleep(0.5)
-            except Exception:
-                pass
-
-            return await self._parse_page(page, domain)
+            return await adapter.check_domain(domain)
         except Exception as exc:
-            fallback = await self._aftermarket_fallback(domain)
-            if fallback:
-                return fallback
             return DomainCheckResult(
                 domain=domain,
                 status="unknown",
-                source="unknown",
+                source=adapter.name,
                 detail=str(exc),
+                prices=[],
             )
 
-    async def _parse_page(self, page: Page, domain: str) -> DomainCheckResult:
-        heading_locator = page.locator('article h2').filter(has_text=domain).first
-
-        if await heading_locator.count() == 0:
-            fallback = await self._aftermarket_fallback(domain)
-            if fallback:
-                return fallback
+    def _aggregate_results(
+        self,
+        domain: str,
+        successes: List[DomainCheckResult],
+        details: List[str],
+    ) -> DomainCheckResult:
+        """Aggregate multiple registrar results into one DomainCheckResult."""
+        if not successes:
             return DomainCheckResult(
                 domain=domain,
                 status="unknown",
                 source="unknown",
-                detail="Domain card not found on page",
+                detail="; ".join(details) if details else "All registrars failed",
+                prices=[],
             )
 
-        article = heading_locator.locator("xpath=../../..")
-        article_text = (await article.inner_text()).lower()
-        article_words = set(article_text.split())
-        buttons = await article.locator("button").all_inner_texts()
-        buttons_lower = [b.lower() for b in buttons]
+        # Collect all price options from successful checks
+        prices: List[PriceOption] = []
+        for res in successes:
+            for po in res.prices:
+                if po.price or po.link:
+                    prices.append(po)
+            # Also wrap legacy single-price results if prices list is empty
+            if not res.prices and (res.price or res.source != "unknown"):
+                link = None
+                if hasattr(res, "prices") and len(res.prices) == 0:
+                    # Try to infer link from source name
+                    link = self._infer_link(res.source, domain)
+                prices.append(
+                    PriceOption(
+                        source=self._source_display_name(res.source),
+                        price=res.price,
+                        currency=res.currency,
+                        link=link,
+                    )
+                )
 
-        is_premium = "premium" in article_words
-        is_taken = (
-            "taken" in article_words
-            or "registered" in article_words
-            or "make offer" in buttons_lower
-        )
+        # Deduplicate prices by source
+        seen = set()
+        unique_prices = []
+        for po in prices:
+            key = (po.source, po.price)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_prices.append(po)
 
-        if is_taken:
-            return DomainCheckResult(domain=domain, status="taken", source="namecheap_page")
+        # Determine overall status by priority
+        # taken is the strongest signal (if any registrar says taken, it's taken)
+        # premium > available > unknown
+        statuses = [r.status for r in successes]
+        if "taken" in statuses:
+            overall_status = "taken"
+        elif "premium" in statuses:
+            overall_status = "premium"
+        elif "available" in statuses:
+            overall_status = "available"
+        else:
+            overall_status = "unknown"
 
-        # Extract price
-        price = None
-        currency = None
-        strong_texts = await article.locator("strong").all_inner_texts()
-        for text in strong_texts:
-            text = text.strip()
-            if any(sym in text for sym in ["€", "$", "£"]):
-                price = text
-                if "€" in text:
-                    currency = "EUR"
-                elif "$" in text:
-                    currency = "USD"
-                elif "£" in text:
-                    currency = "GBP"
+        # Pick best representative price for backward compatibility
+        # Prefer available with price, then any with price
+        best = None
+        for res in successes:
+            if res.status == overall_status and res.price:
+                best = res
                 break
+        if best is None:
+            for res in successes:
+                if res.price:
+                    best = res
+                    break
+        if best is None:
+            best = successes[0]
 
-        if is_premium:
-            return DomainCheckResult(
-                domain=domain,
-                status="premium",
-                price=price,
-                currency=currency,
-                source="namecheap_page",
-            )
+        detail_parts = []
+        for r in successes:
+            if r.detail and r.detail != "Could not determine availability":
+                detail_parts.append(r.detail)
+        for d in details:
+            if d and d != "Could not determine availability":
+                detail_parts.append(d)
 
         return DomainCheckResult(
             domain=domain,
-            status="available",
-            price=price,
-            currency=currency,
-            source="namecheap_page",
+            status=overall_status,
+            price=best.price,
+            currency=best.currency,
+            source="aggregated",
+            detail="; ".join(detail_parts) if detail_parts else None,
+            prices=unique_prices,
         )
 
-    async def _aftermarket_fallback(self, domain: str) -> Optional[DomainCheckResult]:
-        try:
-            url = f"https://aftermarket.namecheapapi.com/domain/status?domain={domain}"
-            resp = await self._client.get(url)
-            data = resp.json()
-            if data.get("type") == "ok" and data.get("data"):
-                item = data["data"][0]
-                status = item.get("status")
-                if status == "notfound":
-                    return DomainCheckResult(
-                        domain=domain,
-                        status="available",
-                        source="aftermarket_api",
-                    )
-                elif status in ("active", "sold", "pending"):
-                    price = item.get("price")
-                    price_str = None
-                    if price:
-                        price_str = f"${price / 100:.2f}"
-                    return DomainCheckResult(
-                        domain=domain,
-                        status="taken",
-                        price=price_str,
-                        currency="USD" if price_str else None,
-                        source="aftermarket_api",
-                    )
-        except Exception:
-            pass
+    def _source_display_name(self, source: str) -> str:
+        mapping = {
+            "namecheap_page": "namecheap",
+            "namecheap_api": "namecheap",
+            "aftermarket_api": "namecheap",
+            "godaddy_api": "godaddy",
+            "godaddy_page": "godaddy",
+            "letshost": "letshost",
+            "cloudflare_api": "cloudflare",
+            "cloudflare_page": "cloudflare",
+        }
+        return mapping.get(source, source)
+
+    def _infer_link(self, source: str, domain: str) -> Optional[str]:
+        if "namecheap" in source:
+            return f"https://www.namecheap.com/domains/registration/results/?domain={domain}"
+        if "godaddy" in source:
+            return f"https://www.godaddy.com/en/domainsearch/find?domainToCheck={domain}"
+        if "letshost" in source:
+            return f"https://billing.letshost.ie/cart.php?a=add&domain=register&query={domain}"
+        if "cloudflare" in source:
+            return f"https://domains.cloudflare.com/?domain={domain}"
         return None
 
     def is_ready(self) -> bool:
-        return self._browser is not None and self._browser.is_connected()
+        if self._namecheap:
+            return self._namecheap.is_ready()
+        return True

@@ -18,11 +18,19 @@ export interface DomainIdea {
   tags: string[];
 }
 
+export interface PriceOption {
+  source: string;
+  price?: string | null;
+  currency?: string | null;
+  link?: string | null;
+}
+
 export interface DomainResult extends DomainIdea {
   domain: string;
   status: "available" | "taken" | "premium" | "unknown";
   price?: string | null;
   currency?: string | null;
+  prices?: PriceOption[];
   selected?: boolean;
 }
 

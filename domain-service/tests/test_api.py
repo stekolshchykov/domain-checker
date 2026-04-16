@@ -136,7 +136,7 @@ async def test_check_page_reuse(client):
     response = await client.post("/check", json={"domains": ["google.com"]})
     assert response.status_code == 200
 
-    page_before = scraper._page
+    page_before = scraper._namecheap._page
     assert page_before is not None
 
     # Second request with multiple domains should reuse the same page
@@ -144,6 +144,6 @@ async def test_check_page_reuse(client):
     response = await client.post("/check", json={"domains": domains})
     assert response.status_code == 200
 
-    page_after = scraper._page
+    page_after = scraper._namecheap._page
     assert page_after is not None
     assert page_before == page_after, "Page should be reused across domains in a single request"
