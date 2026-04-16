@@ -1,21 +1,21 @@
 # Domain Checker API
 
-HTTP API-сервис для проверки доступности доменов через Namecheap. Работает внутри Docker-контейнера с headless Firefox (Playwright).
+HTTP API service for checking domain availability via Namecheap. Runs inside a Docker container with headless Firefox (Playwright).
 
-## Стек
+## Stack
 
 - **Python 3.12 + FastAPI**
 - **Playwright (headless Firefox)**
 - **Docker + Docker Compose**
-- **pytest** для тестирования
+- **pytest** for testing
 
-## Быстрый старт
+## Quick Start
 
 ```bash
 docker-compose up --build api
 ```
 
-API будет доступен по адресу `http://localhost:8000`.
+The API will be available at `http://localhost:8000`.
 
 - **Swagger UI:** `http://localhost:8000/docs`
 - **ReDoc:** `http://localhost:8000/redoc`
@@ -24,7 +24,7 @@ API будет доступен по адресу `http://localhost:8000`.
 
 ### `POST /check`
 
-Принимает массив доменов и возвращает их статус. Ограничений на количество доменов нет — запрос выполняется до конца.
+Accepts an array of domains and returns their availability status. There is **no limit** on the number of domains — the request runs to completion.
 
 **Request:**
 ```json
@@ -57,18 +57,18 @@ API будет доступен по адресу `http://localhost:8000`.
 }
 ```
 
-#### Возможные статусы домена
+#### Possible Domain Statuses
 
-| Статус | Описание | Пример цены |
-|--------|----------|-------------|
-| `available` | Домен свободен для регистрации | `€9.33/yr` |
-| `taken` | Домен уже зарегистрирован | `null` |
-| `premium` | Домен доступен, но премиальный | `€8,842.53` |
-| `unknown` | Не удалось определить статус | `null` |
+| Status | Description | Example Price |
+|--------|-------------|---------------|
+| `available` | Domain is free for registration | `€9.33/yr` |
+| `taken` | Domain is already registered | `null` |
+| `premium` | Domain is available but premium | `€8,842.53` |
+| `unknown` | Could not determine status | `null` |
 
-#### Примеры ответов для разных сценариев
+#### Response Examples for Different Scenarios
 
-**Свободный домен:**
+**Available domain:**
 ```json
 {
   "domain": "qwertyuiop12345abc.com",
@@ -79,7 +79,7 @@ API будет доступен по адресу `http://localhost:8000`.
 }
 ```
 
-**Занятый домен:**
+**Taken domain:**
 ```json
 {
   "domain": "google.com",
@@ -90,7 +90,7 @@ API будет доступен по адресу `http://localhost:8000`.
 }
 ```
 
-**Несуществующий TLD (валидный формат):**
+**Non-existent TLD (valid format):**
 ```json
 {
   "domain": "nonexistent-tld-12345.zzz",
@@ -103,7 +103,7 @@ API будет доступен по адресу `http://localhost:8000`.
 
 ### `GET /health`
 
-Health check с проверкой готовности браузера.
+Health check with browser readiness verification.
 
 **Response 200 OK:**
 ```json
@@ -114,54 +114,54 @@ Health check с проверкой готовности браузера.
 }
 ```
 
-## HTTP коды ответов
+## HTTP Response Codes
 
-| Код | Сценарий |
-|-----|----------|
-| `200 OK` | Успешная проверка доменов или health check |
-| `400 Bad Request` | Невалидный JSON или отсутствует обязательное поле |
-| `422 Unprocessable Entity` | Ошибка валидации: пустой список, невалидный формат домена |
-| `429 Too Many Requests` | Rate limit превышен (редко, т.к. есть внутренний throttle) |
-| `500 Internal Server Error` | Непредвиденная ошибка |
-| `503 Service Unavailable` | Браузер не готов к работе |
+| Code | Scenario |
+|------|----------|
+| `200 OK` | Successful domain check or health check |
+| `400 Bad Request` | Invalid JSON or missing required field |
+| `422 Unprocessable Entity` | Validation error: empty list, invalid domain format |
+| `429 Too Many Requests` | Rate limit exceeded (rare due to internal throttling) |
+| `500 Internal Server Error` | Unexpected error |
+| `503 Service Unavailable` | Browser is not ready |
 
-## Валидация доменов
+## Domain Validation
 
-API проверяет формат каждого домена **до** открытия браузера. Следующие значения отклоняются с `422`:
+The API validates the format of each domain **before** opening the browser. The following are rejected with `422`:
 
-- `not_a_domain` — отсутствует точка
-- `domain with spaces` — содержит пробелы
-- `test.` — заканчивается точкой
-- `-example.com` — начинается с дефиса
-- `example-.com` — дефис перед точкой
-- `[]` / `null` — пустой список или не строка
+- `not_a_domain` — no dot
+- `domain with spaces` — contains spaces
+- `test.` — ends with a dot
+- `-example.com` — starts with a hyphen
+- `example-.com` — hyphen before the dot
+- `[]` / `null` — empty list or non-string
 
-Если формат валиден, но TLD не существует, API вернёт `available` на основе Aftermarket API Namecheap.
+If the format is valid but the TLD does not exist, the API returns `available` based on the Namecheap Aftermarket API.
 
-## Особенности работы
+## How It Works
 
-- **Rate limiting:** между любыми двумя проверками доменов строгий интервал **5 секунд**. Например, 10 доменов займут минимум **45 секунд**.
-- **Page reuse:** несколько доменов в одном запросе проверяются последовательно в **одной вкладке Firefox** без пересоздания.
-- **Fallback:** если страница Namecheap недоступна или не содержит данных, используется Aftermarket API.
-- **Без таймаута соединения:** сервер не разрывает HTTP-соединение, сколько бы ни длилась проверка.
+- **Rate limiting:** a strict **5-second** pause between any two domain checks. For example, 10 domains will take at least **45 seconds**.
+- **Page reuse:** multiple domains in a single request are checked sequentially in **one Firefox tab** without recreation.
+- **Fallback:** if the Namecheap page is unavailable or lacks data, the Aftermarket API is used.
+- **No connection timeout:** the server does not drop the HTTP connection regardless of how long the check takes.
 
-## Тестирование (только в Docker)
+## Testing (Docker only)
 
 ```bash
 docker-compose --profile test run --rm test
 ```
 
-На текущий момент реализовано **16 тестов**, включая:
-- проверку занятых, свободных и premium-доменов
-- валидацию пустых и невалидных доменов
-- проверку rate-limiting (≥5 сек между доменами)
-- проверку reuse page
+Currently there are **16 tests**, including:
+- taken, available, and premium domains
+- validation of empty and invalid domains
+- rate-limiting verification (≥5 seconds between domains)
+- page reuse verification
 
-## Переменные окружения
+## Environment Variables
 
-| Переменная | Описание | По умолчанию |
-|------------|----------|--------------|
-| `PLAYWRIGHT_HEADLESS` | Headless-режим браузера | `true` |
-| `RATE_LIMIT_SECONDS` | Минимальный интервал между проверками | `5.0` |
-| `PAGE_TIMEOUT_MS` | Таймаут загрузки одной страницы | `15000` |
-| `LONG_HEALTH_CHECK_DOMAIN` | Длинный домен для тестов | `this-is-very-long-health-check-domain-name-test-1234567890.com` |
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PLAYWRIGHT_HEADLESS` | Run browser in headless mode | `true` |
+| `RATE_LIMIT_SECONDS` | Minimum interval between checks | `5.0` |
+| `PAGE_TIMEOUT_MS` | Page load timeout for a single domain | `15000` |
+| `LONG_HEALTH_CHECK_DOMAIN` | Long domain used for tests | `this-is-very-long-health-check-domain-name-test-1234567890.com` |

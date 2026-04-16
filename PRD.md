@@ -1,105 +1,105 @@
 # PRD: Domain Checker API
 
-## 1. Общее описание проекта
+## 1. Project Overview
 
-**Domain Checker** — это HTTP API-сервис, развёртываемый в Docker-контейнере. Он принимает один или несколько доменных имён и возвращает их статус доступности для регистрации, а также цену (если домен свободен) или информацию о занятости (если домен уже зарегистрирован).
+**Domain Checker** is an HTTP API service deployed in a Docker container. It accepts one or more domain names and returns their availability status for registration, along with the price (if the domain is available) or occupancy information (if the domain is already registered).
 
-Данные собираются **в реальном времени** из открытого интерфейса регистратора Namecheap через автоматизацию браузера (Playwright) и вспомогательные внутренние API Namecheap.
+Data is collected **in real time** from the open Namecheap registrar interface via browser automation (Playwright) and auxiliary internal Namecheap APIs.
 
 ---
 
-## 2. Цели и задачи
+## 2. Goals and Objectives
 
-| # | Задача | Критерий успеха |
+| # | Objective | Success Criteria |
 |---|---|---|
-| 1 | Принимать запросы с одним или множеством доменов | `POST /check` поддерживает массив `domains` любого размера |
-| 2 | Определять статус домена | `available` / `taken` / `premium` / `unknown` |
-| 3 | Извлекать цену регистрации | Для свободных/Premium доменов возвращать `price` и `currency` |
-| 4 | Работать через реальный браузер в фоне | Playwright headless Chromium внутри Docker |
-| 5 | Реализовать корректное API-поведение | HTTP-коды, валидация, структурированные ошибки |
-| 6 | Развёртываться и тестироваться в Docker | `docker-compose up --build` + `docker-compose run --rm test` |
-| 7 | Покрыть тестами разные сценарии | ≥10 автоматизированных API-тестов на занятые и свободные домены |
+| 1 | Accept requests with one or many domains | `POST /check` supports a `domains` array of any size (no limit) |
+| 2 | Determine domain status | `available` / `taken` / `premium` / `unknown` |
+| 3 | Extract registration price | Return `price` and `currency` for available/premium domains |
+| 4 | Operate via a real background browser | Playwright headless Firefox inside Docker |
+| 5 | Implement proper API behavior | HTTP codes, validation, structured errors |
+| 6 | Deploy and test in Docker | `docker-compose up --build` + `docker-compose run --rm test` |
+| 7 | Cover diverse scenarios with tests | 16 automated API tests for taken, available, premium domains, validation, rate-limit, and reuse page |
 
 ---
 
-## 3. Исследование Namecheap
+## 3. Namecheap Research
 
-### 3.1. Страница результатов
-URL шаблон:
+### 3.1. Results Page URL
 ```
 https://www.namecheap.com/domains/registration/results/?domain=<DOMAIN>
 ```
 
-Примеры:
+Examples:
 - `https://www.namecheap.com/domains/registration/results/?domain=KnowFlow.com`
 - `https://www.namecheap.com/domains/registration/results/?domain=qwertyuiop12345abc.com`
 
-### 3.2. Варианты ответа на странице
+### 3.2. Page Response Variants
 
-При анализе DOM-структуры загруженной страницы выявлены следующие паттерны:
+The following patterns were identified by analyzing the DOM structure of the loaded page:
 
-#### A. Занятый домен (Taken)
-- Присутствует текстовая метка: `Taken` или `Registered in YYYY`
-- Кнопка действия: `Make offer`
-- Пример доменов: `knowflow.xyz`, `knowflow.io`, `knowflow.cloud`
+#### A. Taken Domain
+- Text label present: `Taken` or `Registered in YYYY`
+- Action button: `Make offer`
+- Example domains: `knowflow.xyz`, `knowflow.io`, `knowflow.cloud`
 
-#### B. Свободный домен (Available)
-- Отображается цена регистрации (например: `€9.33/yr`, `€4.23/yr`)
-- Кнопка действия: `Add to cart`
-- Может присутствовать скидочный бейдж: `42% OFF`, `New`
-- Пример доменов: `qwertyuiop12345abc.com`, `qwertyuiop12345abc.org`
+#### B. Available Domain
+- Registration price displayed (e.g. `€9.33/yr`, `€4.23/yr`)
+- Action button: `Add to cart`
+- Discount badge may be present: `42% OFF`, `New`
+- Example domains: `qwertyuiop12345abc.com`, `qwertyuiop12345abc.org`
 
-#### C. Премиум-домен (Premium)
-- Метка: `Premium`
-- Высокая цена (например: `€8,842.53`)
-- Кнопка: `Add to cart`
-- Пример: `knowflow.com` (premium)
+#### C. Premium Domain
+- Label: `Premium`
+- High price (e.g. `€8,842.53`)
+- Button: `Add to cart`
+- Example: `knowflow.com` (premium)
 
-### 3.3. Внутренние API Namecheap
+### 3.3. Internal Namecheap APIs
 
-В процессе загрузки страницы Namecheap выполняет XHR-запросы. Некоторые из них можно использовать как дополнительный источник данных:
+During page loading, Namecheap makes XHR requests. Some of them can be used as an additional data source:
 
 **Aftermarket Status API:**
 ```
 GET https://aftermarket.namecheapapi.com/domain/status?domain=<DOMAIN>
 ```
 
-Ответы:
-- Свободен: `{"type":"ok","data":[{"domain":"qwertyuiop12345abc.com","status":"notfound"}]}`
-- Занят/Aftermarket: `{"type":"ok","data":[{"domain":"knowflow.com","status":"active","price":10405,"retail":10456,"type":"buynow","username":"sedo"}]}`
+Responses:
+- Available: `{"type":"ok","data":[{"domain":"qwertyuiop12345abc.com","status":"notfound"}]}`
+- Taken/Aftermarket: `{"type":"ok","data":[{"domain":"knowflow.com","status":"active","price":10405,"retail":10456,"type":"buynow","username":"sedo"}]}`
 
-> **Примечание:** этот API возвращает информацию только о доменах, находящихся в aftermarket-списке, или `notfound`. Для полного анализа (скидки, точные розничные цены, премиум-статус) требуется парсинг основной страницы через браузер.
+> **Note:** this API only returns information for domains in the aftermarket list, or `notfound`. For full analysis (discounts, exact retail prices, premium status), parsing the main page via browser is required.
 
 ---
 
-## 4. Технологический стек
+## 4. Technology Stack
 
-| Компонент | Технология | Обоснование |
+| Component | Technology | Rationale |
 |---|---|---|
-| **Backend** | Python 3.12 + FastAPI | Простота, скорость разработки, встроенная валидация (Pydantic), async из коробки |
-| **Browser Automation** | Playwright (async API) | Официальная поддержка headless Chromium, стабильная работа в Docker, удобный Python API |
-| **Server** | Uvicorn | Стандартный ASGI-сервер для FastAPI, работает в Docker без проблем |
-| **Тестирование** | pytest + pytest-asyncio + HTTPX | HTTPX — родной async клиент для тестирования FastAPI, pytest-asyncio для Playwright-фикстур |
-| **Конфигурация** | Pydantic Settings + `.env` | Типобезопасная конфигурация, удобно в Docker через `environment:` |
-| **Контейнеризация** | Docker + Docker Compose | Один `docker-compose.yml` для подъёма сервиса и запуска тестов |
+| **Backend** | Python 3.12 + FastAPI | Simplicity, speed of development, built-in validation (Pydantic), async out of the box |
+| **Browser Automation** | Playwright (async API) | Official support for headless Firefox, stable operation in Docker, convenient Python API |
+| **Server** | Uvicorn | Standard ASGI server for FastAPI, works in Docker without issues |
+| **Testing** | pytest + pytest-asyncio + HTTPX | HTTPX is the native async client for testing FastAPI, pytest-asyncio for Playwright fixtures |
+| **Configuration** | Pydantic Settings + `.env` | Type-safe configuration, convenient in Docker via `environment:` |
+| **Containerization** | Docker + Docker Compose | One `docker-compose.yml` to spin up the service and run tests |
 
-### Почему Python + FastAPI + Playwright в Docker — оптимальный выбор
-- **Playwright** имеет официальные Docker-образы (`mcr.microsoft.com/playwright/python:v1.x.x-jammy`) с предустановленными системными зависимостями и браузерами.
-- **FastAPI** + **Uvicorn** легко упаковываются в один контейнер, быстро стартуют и потребляют минимум ресурсов.
-- Не требуется отдельный Selenium Grid или сложная оркестрация — всё работает в **одном контейнере**.
-- Для тестов достаточно `docker-compose run --rm test`, который запустит браузер внутри того же образа.
+### Why Python + FastAPI + Playwright in Docker is the optimal choice
+- **Playwright** has official Docker images (`mcr.microsoft.com/playwright/python:v1.x.x-noble`) with pre-installed system dependencies and browsers.
+- **Headless Firefox** is used in production — it more reliably passes Namecheap's Cloudflare protection compared to Chromium.
+- **FastAPI** + **Uvicorn** are easy to package into a single container, start quickly, and consume minimal resources.
+- No separate Selenium Grid or complex orchestration is required — everything runs in **one container**.
+- For tests, `docker-compose run --rm test` is enough to run the browser inside the same image.
 
 ---
 
-## 5. Архитектура решения
+## 5. Architecture
 
-### 5.1. Диаграмма
+### 5.1. Diagram
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    Docker Container                         │
 │  ┌─────────────────┐      POST /check       ┌───────────┐  │
-│  │   Клиент        │ ─────────────────────> │  FastAPI  │  │
+│  │   Client        │ ─────────────────────> │  FastAPI  │  │
 │  │   (curl/tests)  │  { "domains": [...] }  │   App     │  │
 │  └─────────────────┘                        └─────┬─────┘  │
 │                                                   │         │
@@ -114,52 +114,53 @@ GET https://aftermarket.namecheapapi.com/domain/status?domain=<DOMAIN>
 │                                                 ▼          │
 │                                         ┌───────────────┐  │
 │                                         │  Headless     │  │
-│                                         │  Chromium     │  │
+│                                         │  Firefox      │  │
 │                                         └───────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 5.2. Алгоритм проверки одного домена
+### 5.2. Single Domain Check Algorithm
 
-1. **Запуск браузера** (если ещё не запущен) — Playwright Chromium в headless-режиме.
-2. **Открытие страницы** `https://www.namecheap.com/domains/registration/results/?domain=<domain>`.
-3. **Ожидание загрузки** результатов (до 10 секунд).
-4. **Закрытие cookie-диалога** (если появился).
-5. **Парсинг DOM:**
-   - Ищем заголовок с точным именем домена (например, `h2: "knowflow.com"`).
-   - Определяем наличие меток: `Taken`, `Registered in`, `Premium`.
-   - Определяем тип кнопки: `Make offer` (занят) или `Add to cart` (свободен/премиум).
-   - Извлекаем цену из элемента `strong` рядом с доменом.
-6. **Fallback на Aftermarket API:** если DOM не содержит чёткого результата (например, таймаут или капча), делаем запрос к `aftermarket.namecheapapi.com`.
-7. **Формирование результата:**
+1. **Start the browser** (if not already running) — Playwright Firefox in headless mode.
+2. **Open the page** `https://www.namecheap.com/domains/registration/results/?domain=<domain>`.
+3. **Wait for results** to load (up to 15 seconds).
+4. **Close the cookie dialog** if it appears.
+5. **Parse the DOM:**
+   - Find the heading with the exact domain name (e.g. `h2: "knowflow.com"`).
+   - Determine the presence of labels: `Taken`, `Registered in`, `Premium`.
+   - Determine the button type: `Make offer` (taken) or `Add to cart` (available/premium).
+   - Extract the price from the `strong` element next to the domain.
+6. **Fallback to Aftermarket API:** if the DOM does not contain a clear result (timeout, CAPTCHA, etc.), call `aftermarket.namecheapapi.com`.
+7. **Form the result:**
    - `status`: `available` | `taken` | `premium` | `unknown`
-   - `price`: строка с ценой или `null`
-   - `currency`: извлечённая валюта (`EUR`, `USD`) или `null`
+   - `price`: price string or `null`
+   - `currency`: extracted currency (`EUR`, `USD`) or `null`
    - `source`: `namecheap_page` | `aftermarket_api` | `unknown`
 
-### 5.3. Обработка нескольких доменов и Rate Limiting
+### 5.3. Multiple Domains and Rate Limiting
 
-#### A. Переиспользование вкладки (page reuse)
-- Если в одном API-запросе передано **несколько доменов**, они проверяются **последовательно в одной и той же вкладке** браузера.
-- После проверки первого домена страница **не закрывается**. Вместо этого выполняется навигация (`page.goto()`) к URL следующего домена.
-- Это снижает накладные расходы на создание/закрытие контекстов и уменьшает цифровой след для анти-фрода Namecheap.
+#### A. Page Reuse
+- If **multiple domains** are passed in a single API request, they are checked **sequentially in the same browser tab**.
+- After checking the first domain, the page is **not closed**. Instead, navigation (`page.goto()`) to the next domain's URL is performed.
+- This reduces overhead from creating/closing contexts and lowers the digital fingerprint for Namecheap anti-fraud.
 
-#### B. Жёсткий rate limit — минимум 5 секунд между любыми запросами
-- Между **любыми двумя последовательными проверками доменов** (в рамках одного API-запроса или между разными API-запросами) должен соблюдаться интервал **не менее 5 секунд**.
-- Для реализации используется глобальный асинхронный семафор + трекер времени последнего запроса (`last_request_at`).
-- Перед каждым `page.goto()` скрапер вычисляет: `sleep = max(0, 5.0 - (now - last_request_at))` и обязательно делает `await asyncio.sleep(sleep)`.
-- Таким образом, даже если клиент передал 100 доменов в одном `POST /check`, они будут обрабатываться в одной вкладке с паузой ≥5 секунд между каждым. Сервер не разрывает соединение — запрос дожидается финала проверки последнего домена.
+#### B. Strict Rate Limit — Minimum 5 Seconds Between Any Requests
+- A **minimum 5-second** interval must be observed between **any two sequential domain checks** (within a single API request or across different requests).
+- This is implemented via a global async lock + a last-request tracker (`last_request_at`).
+- Before each `page.goto()`, the scraper calculates: `sleep = max(0, 5.0 - (now - last_request_at))` and performs `await asyncio.sleep(sleep)`.
+- Thus, even if a client sends 100 domains in one `POST /check`, they will be processed in one tab with a ≥5 second pause between each.
 
-#### C. Параллелизм
-- Параллельная обработка разных API-запросов допускается, но каждая проверка домена всё равно проходит через общий rate-limiter.
-- Максимальное количество одновременных проверок (семафор) ограничено **1** для гарантии соблюдения 5-секундного интервала между любыми парами запросов.
-- При необходимости масштабирования в будущем можно добавить пул вкладок с индивидуальными rate-limiter’ами, но на старте — **1 page, 1 контекст, 5 секунд delay**.
+#### C. Concurrency and Limits
+- Parallel processing of different API requests is allowed, but each domain check still passes through the shared rate-limiter.
+- The maximum number of simultaneous checks (semaphore) is limited to **1** to guarantee the 5-second interval between any pair of requests.
+- **No limit** on the number of domains in a single request (`max_length` removed).
+- **No HTTP connection timeout** — the server waits until all domains are checked, regardless of duration.
 
 ---
 
-## 6. API Спецификация
+## 6. API Specification
 
-### 6.1. Проверка доменов
+### 6.1. Check Domains
 
 **Endpoint:** `POST /check`
 
@@ -170,7 +171,7 @@ GET https://aftermarket.namecheapapi.com/domain/status?domain=<DOMAIN>
 }
 ```
 
-> **Примечание:** ограничений на количество доменов в одном запросе нет. Сервер не разрывает HTTP-соединение по таймауту — запрос выполняется до тех пор, пока не будут проверены все домены.
+> **Note:** there is no limit on the number of domains. The server does not drop the HTTP connection by timeout — the request runs until all domains are checked.
 
 **Response 200 OK:**
 ```json
@@ -204,10 +205,10 @@ GET https://aftermarket.namecheapapi.com/domain/status?domain=<DOMAIN>
 ```
 
 **Status enum:**
-- `available` — домен свободен для регистрации, есть цена.
-- `taken` — домен уже зарегистрирован.
-- `premium` — домен доступен, но относится к премиум-категории с повышенной ценой.
-- `unknown` — не удалось определить статус (ошибка, капча, таймаут).
+- `available` — domain is free for registration, price is present.
+- `taken` — domain is already registered.
+- `premium` — domain is available but falls into the premium category with a higher price.
+- `unknown` — could not determine status (error, CAPTCHA, timeout).
 
 ### 6.2. Health Check
 
@@ -222,42 +223,49 @@ GET https://aftermarket.namecheapapi.com/domain/status?domain=<DOMAIN>
 }
 ```
 
-### 6.3. Модель внутреннего rate-limiter
+### 6.3. Internal Rate-Limiter Model
 
-В `scraper.py` реализован класс `RateLimitedScraper` с атрибутами:
-- `_last_request_at: float` — timestamp последнего HTTP-запроса к Namecheap.
-- `_lock: asyncio.Lock` — гарантирует, что только один домен проверяется в данный момент.
+The `RateLimitedScraper` class in `scraper.py` has:
+- `_last_request_at: float` — timestamp of the last HTTP request to Namecheap.
+- `_lock: asyncio.Lock` — guarantees that only one domain is being checked at a time.
 
-Псевдокод метода `_throttle()`:
+Pseudo-code of the `_throttle()` method:
 ```python
 async def _throttle(self):
-    async with self._lock:
-        elapsed = time.monotonic() - self._last_request_at
-        if elapsed < 5.0:
-            await asyncio.sleep(5.0 - elapsed)
-        self._last_request_at = time.monotonic()
+    elapsed = time.monotonic() - self._last_request_at
+    delay = settings.rate_limit_seconds - elapsed
+    if delay > 0:
+        await asyncio.sleep(delay)
+    self._last_request_at = time.monotonic()
 ```
 
-Метод `check_domains(domains: list[str])`:
-1. Открывает одну `page` (если ещё не открыта).
-2. Для каждого домена вызывает `_throttle()`.
-3. Выполняет `await page.goto(url)`.
-4. Парсит DOM.
-5. После обработки всех доменов **не закрывает** `page` — оставляет её открытой для следующего API-запроса (или закрывает при shutdown приложения).
+The `check_domains(domains: list[str])` method:
+1. Opens one `page` (if not already open).
+2. For each domain, calls `_throttle()`.
+3. Executes `await page.goto(url)`.
+4. Parses the DOM.
+5. After processing all domains, **does not close** `page` — leaves it open for the next API request (or closes it on application shutdown).
 
-### 6.4. Коды ответов и обработка ошибок
+### 6.4. Response Codes and Error Handling
 
-| HTTP Code | Сценарий | Тело ответа |
-|-----------|----------|-------------|
-| `200 OK` | Успешная проверка доменов | `{ "results": [...], "checked_at": "...", "total_checks": N }` |
-| `201 Created` | — (резерв) | — |
-| `400 Bad Request` | Невалидный JSON, отсутствует обязательное поле | `{ "detail": "Invalid JSON body" }` или Pydantic validation error |
-| `422 Unprocessable Entity` | Ошибка валидации Pydantic (пустой список, невалидный домен, >N доменов) | Стандартный Pydantic error response |
-| `429 Too Many Requests` | Глобальный rate limiter API-уровня (если клиенты шлют слишком много запросов) | `{ "detail": "Rate limit exceeded. Try again later." }` |
-| `500 Internal Server Error` | Непредвиденная ошибка скрапера, браузер упал | `{ "detail": "Internal server error" }` |
-| `503 Service Unavailable` | Браузер не готов, невозможно установить соединение с Namecheap | `{ "detail": "Browser not ready" }` или `{ "detail": "Namecheap unavailable" }` |
+| HTTP Code | Scenario | Response Body |
+|-----------|----------|---------------|
+| `200 OK` | Successful domain check | `{ "results": [...], "checked_at": "...", "total_checks": N }` |
+| `400 Bad Request` | Invalid JSON or missing required field | `{ "detail": "Invalid JSON body" }` or Pydantic validation error |
+| `422 Unprocessable Entity` | Pydantic validation error (empty list, invalid domain format) | Standard Pydantic error response |
+| `429 Too Many Requests` | Global API-level rate limiter (too many requests) | `{ "detail": "Rate limit exceeded. Try again later." }` |
+| `500 Internal Server Error` | Unexpected scraper error, browser crash | `{ "detail": "Internal server error" }` |
+| `503 Service Unavailable` | Browser not ready or cannot connect to Namecheap | `{ "detail": "Browser not ready" }` or `{ "detail": "Namecheap unavailable" }` |
 
-#### Структура ошибок (Unified Error Model)
+#### Domain Format Validation
+Before opening the browser, Pydantic validates each domain with a regular expression:
+```
+^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$
+```
+
+Rejected inputs: domains without a dot, with spaces, ending with a dot, with a hyphen at the label boundary, empty strings. On invalid format, `422` is returned with `error.code = VALIDATION_ERROR`.
+
+#### Unified Error Model
 ```json
 {
   "error": {
@@ -270,25 +278,29 @@ async def _throttle(self):
 }
 ```
 
-#### Кастомные Exception Handler’ы FastAPI
-- `ValidationError` → 422 с unified error model
-- `DomainCheckError` (кастомное исключение скрапера) → 503 или 500
+#### Custom FastAPI Exception Handlers
+- `RequestValidationError` → 422 with unified error model
+- `BrowserNotReadyError` (custom scraper exception) → 503 or 500
 - `RateLimitExceeded` → 429
-- `Exception` (catch-all) → 500 с минимальной информацией (production-safe)
+- `Exception` (catch-all) → 500 with minimal info (production-safe)
 
 ---
 
-## 7. Docker-инфраструктура
+## 7. Docker Infrastructure
 
 ### 7.1. Dockerfile
 
-Используется официальный образ Playwright как базовый для избежания ручной установки системных зависимостей Chromium.
+The official Playwright image is used as the base to avoid manual installation of Firefox system dependencies.
 
 ```dockerfile
 # syntax=docker/dockerfile:1
-FROM mcr.microsoft.com/playwright/python:v1.51.0-noble
+FROM mcr.microsoft.com/playwright/python:v1.58.0-noble
 
 WORKDIR /app
+
+# Install curl for healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
 
 # Python deps
 COPY pyproject.toml .
@@ -299,6 +311,7 @@ COPY src/ ./src/
 COPY tests/ ./tests/
 
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
 ENV APP_HOST=0.0.0.0
 ENV APP_PORT=8000
 
@@ -326,7 +339,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 15s
+      start_period: 30s
 
   test:
     build: .
@@ -343,152 +356,156 @@ services:
       - test
 ```
 
-### 7.3. Команды для локальной разработки и тестирования
+### 7.3. Local Development and Testing Commands
 
 ```bash
-# Поднять сервис
+# Spin up the service
 docker-compose up --build api
 
-# Запустить тесты внутри Docker (только в Docker!)
+# Run tests inside Docker (only supported method)
 docker-compose --profile test run --rm test
 
-# Остановить всё
+# Stop everything
 docker-compose down
 ```
 
-### 7.4. Почему тесты обязаны запускаться именно в Docker
-- Официальный образ Playwright содержит все системные библиотеки, необходимые для headless Chromium (libnss3, libatk, libcups и т.д.).
-- Эти зависимости сложно поддерживать в едином виде на разных хостовых ОС (macOS, разные дистрибутивы Linux).
-- Docker гарантирует **воспроизводимость** тестов: один и тот же браузер, одинаковые шрифты, одинаковое окружение.
-- `docker-compose --profile test run --rm test` — единственный supported способ локального прогона тестов.
+### 7.4. Why Tests Must Run in Docker
+- The official Playwright image contains all system libraries required for headless Firefox (libnss3, libatk, libcups, etc.).
+- These dependencies are hard to maintain consistently across host OSes (macOS, various Linux distributions).
+- Docker guarantees **reproducibility**: the same browser, same fonts, same environment.
+- `docker-compose --profile test run --rm test` is the only supported way to run tests locally.
 
 ---
 
-## 8. Этапы реализации
+## 8. Implementation Phases
 
-### Этап 1 — Подготовка окружения
-- [ ] Инициализация Python-проекта (`pyproject.toml`)
-- [ ] Установка зависимостей: `fastapi`, `uvicorn[standard]`, `playwright`, `pydantic-settings`, `httpx`, `pytest`, `pytest-asyncio`, `pytest-playwright`
-- [ ] Создание `Dockerfile` на базе `mcr.microsoft.com/playwright/python:v1.51.0-noble`
-- [ ] Создание `docker-compose.yml` с сервисами `api` и `test`
-- [ ] Проверка подъёма контейнера: `docker-compose up --build api`
+### Phase 1 — Environment Setup
+- [x] Initialize Python project (`pyproject.toml`)
+- [x] Install dependencies: `fastapi`, `uvicorn[standard]`, `playwright`, `pydantic-settings`, `httpx`, `pytest`, `pytest-asyncio`, `pytest-playwright`
+- [x] Create `Dockerfile` based on `mcr.microsoft.com/playwright/python:v1.58.0-noble`
+- [x] Create `docker-compose.yml` with `api` and `test` services
+- [x] Verify container starts: `docker-compose up --build api`
 
-### Этап 2 — Разработка модуля браузер-скрапинга
-- [ ] Создание `src/scraper.py` с классом `RateLimitedScraper`
-- [ ] Реализация `_throttle()` с 5-секундной задержкой и `asyncio.Lock`
-- [ ] Реализация `check_domain(domain: str) -> DomainResult` с headless Chromium
-- [ ] Настройка User-Agent и viewport для снижения риска блокировки
-- [ ] Реализация парсинга DOM по селекторам страницы Namecheap
-- [ ] Интеграция fallback на Aftermarket API
-- [ ] Обработка ошибок (таймаут, неожиданная структура страницы)
+### Phase 2 — Browser Scraping Module
+- [x] Create `src/scraper.py` with `RateLimitedScraper` class
+- [x] Implement `_throttle()` with 5-second delay and `asyncio.Lock`
+- [x] Implement `check_domain(domain: str) -> DomainResult` with headless Firefox
+- [x] Configure User-Agent and viewport to reduce blocking risk
+- [x] Implement DOM parsing via Namecheap page selectors
+- [x] Integrate fallback to Aftermarket API
+- [x] Handle errors (timeout, unexpected page structure)
 
-### Этап 3 — Разработка API
-- [ ] Создание `src/main.py` с FastAPI приложением
-- [ ] Реализация Pydantic-моделей (`src/models.py`) для запросов/ответов/ошибок
-- [ ] Реализация эндпоинтов `POST /check` и `GET /health`
-- [ ] Реализация кастомных exception handler’ов (422, 429, 500, 503)
-- [ ] Глобальный lifecycle управление browser-контекстом (startup / shutdown)
+### Phase 3 — API Development
+- [x] Create `src/main.py` with FastAPI application
+- [x] Implement Pydantic models (`src/models.py`) for requests/responses/errors
+- [x] Implement `POST /check` and `GET /health` endpoints
+- [x] Implement custom exception handlers (422, 429, 500, 503)
+- [x] Add regex domain-format validation with informative 422 responses
+- [x] Global lifecycle management for the browser context (startup / shutdown)
 
-### Этап 4 — Интеграция Docker и локальное тестирование
-- [ ] Настройка `Dockerfile` для копирования `src/` и `tests/`
-- [ ] Успешный запуск сервиса через `docker-compose up --build api`
-- [ ] Проверка endpoint’ов из хоста: `curl http://localhost:8000/health`
+### Phase 4 — Docker Integration and Local Testing
+- [x] Configure `Dockerfile` to copy `src/` and `tests/`
+- [x] Successfully start the service via `docker-compose up --build api`
+- [x] Verify endpoints from host: `curl http://localhost:8000/health`
 
-### Этап 5 — Тестирование (только в Docker)
-- [ ] Написание API-тестов в `tests/test_api.py`
-- [ ] Тесты должны покрывать:
-  - Свободные домены (минимум 5)
-  - Занятые домены (минимум 5)
-  - Премиум-домен (минимум 1)
-  - Проверку ошибок валидации (пустой список, невалидный домен)
-  - **Rate-limiting:** замер времени между проверками в одном запросе (≥5 сек)
-  - **Reuse page:** проверка что при множественных доменах в одном запросе не создаётся больше 1 page
-- [ ] Успешный прогон: `docker-compose --profile test run --rm test`
+### Phase 5 — Testing (Docker Only)
+- [x] Write API tests in `tests/test_api.py`
+- [x] Tests cover:
+  - Available domains
+  - Taken domains
+  - Premium domain
+  - Validation error checks (empty list, invalid domain format)
+  - **Rate-limiting:** elapsed time measurement between checks in one request (≥5 sec)
+  - **Reuse page:** verify that no more than 1 page is created for multiple domains in a single request
+- [x] Successful run: `docker run --rm domain-checker-api pytest -v tests/`
 
-### Этап 6 — Документирование
-- [ ] README.md с инструкциями по запуску в Docker
-- [ ] Примеры запросов через `curl`
-- [ ] Описание переменных окружения
-
----
-
-## 9. Тест-план (≥10 тестов)
-
-| # | Тест | Ожидаемый результат | Тип домена / сценарий |
-|---|------|---------------------|----------------------|
-| 1 | `POST /check` → `["google.com"]` | `status: taken` | Занятый |
-| 2 | `POST /check` → `["facebook.com"]` | `status: taken` | Занятый |
-| 3 | `POST /check` → `["amazon.com"]` | `status: taken` | Занятый |
-| 4 | `POST /check` → `["knowflow.com"]` | `status: premium`, `price` присутствует | Премиум |
-| 5 | `POST /check` → `["knowflow.xyz"]` | `status: taken` | Занятый |
-| 6 | `POST /check` → `["qwertyuiop12345abc.com"]` | `status: available`, `price` присутствует | Свободный |
-| 7 | `POST /check` → `["brandnewstartup-test-2026.org"]` | `status: available`, `price` присутствует | Свободный |
-| 8 | `POST /check` → `["super-random-domain-999.net"]` | `status: available`, `price` присутствует | Свободный |
-| 9 | `POST /check` → `["google.com", "qwertyuiop12345abc.com"]` | Оба результата корректны | Микс |
-| 10 | `POST /check` → `[]` | HTTP 422 Validation Error | Ошибка валидации |
-| 11 | `GET /health` | `status: ok`, `browser_ready: true` | Health check |
-| 12 | `POST /check` → 3 домена | Общее время ≥10 сек (2 интервала по 5 сек) | Rate limit |
-| 13 | `POST /check` → 2 домена, затем `POST /check` → 1 домен | Между запросами ≥5 сек, создано не более 1 page | Rate limit + reuse page |
-
-> **Важно:** во время выполнения тестов Playwright обязан запускать браузер в фоновом режиме (headless) **внутри Docker-контейнера**.
+### Phase 6 — Documentation
+- [x] `README.md` with installation and run instructions in English
+- [x] `curl` request examples
+- [x] Description of environment variables
 
 ---
 
-## 10. Структура проекта
+## 9. Test Plan (16 Tests)
+
+| # | Test | Expected Result | Domain Type / Scenario |
+|---|------|-----------------|------------------------|
+| 1 | `POST /check` → `["google.com"]` | `status: taken` | Taken |
+| 2 | `POST /check` → `["facebook.com"]` | `status: taken` | Taken |
+| 3 | `POST /check` → `["amazon.com"]` | `status: taken` | Taken |
+| 4 | `POST /check` → `["knowflow.com"]` | `status: premium`, `price` present | Premium |
+| 5 | `POST /check` → `["knowflow.xyz"]` | `status: taken` | Taken |
+| 6 | `POST /check` → `["qwertyuiop12345abc.com"]` | `status: available`, `price` present | Available |
+| 7 | `POST /check` → `["this-is-very-long-health-check-domain-name-test-1234567890.com"]` | `status: available`, `price` present | Available (long domain) |
+| 8 | `POST /check` → `["google.com", "qwertyuiop12345abc.com"]` | Both results correct | Mixed |
+| 9 | `POST /check` → `[]` | HTTP 422 Validation Error | Validation error |
+| 10 | `GET /health` | `status: ok`, `browser_ready: true` | Health check |
+| 11 | `POST /check` → 2 domains | Elapsed ≥5 sec (one 5-sec delay) | Rate limit |
+| 12 | `POST /check` → 1 domain, then `POST /check` → 2 domains | Delay between requests ≥5 sec, no more than 1 page created | Rate limit + reuse page |
+| 13 | `POST /check` → `["not_a_domain"]` | HTTP 422 Validation Error | Invalid format (no dot) |
+| 14 | `POST /check` → `["domain with spaces"]` | HTTP 422 Validation Error | Invalid format (spaces) |
+| 15 | `POST /check` → `["test."]` | HTTP 422 Validation Error | Invalid format (trailing dot) |
+| 16 | `POST /check` → `["-example.com"]` | HTTP 422 Validation Error | Invalid format (leading hyphen) |
+
+> **Important:** during test execution, Playwright must launch the browser in headless mode **inside the Docker container**.
+
+---
+
+## 10. Project Structure
 
 ```
 domain-checker/
-├── PRD.md                      # <- настоящий документ
-├── README.md                   # Инструкции по запуску в Docker
-├── Dockerfile                  # Образ на базе Playwright Python
-├── docker-compose.yml          # Сервисы api + test
-├── pyproject.toml              # Зависимости Python
-├── .env.example                # Пример переменных окружения
+├── PRD.md                      # This document
+├── README.md                   # Run instructions in English
+├── Dockerfile                  # Image based on Playwright Python
+├── docker-compose.yml          # api + test services
+├── pyproject.toml              # Python dependencies
+├── .env.example                # Example environment variables
 ├── src/
 │   ├── __init__.py
-│   ├── main.py                 # FastAPI приложение + exception handlers
+│   ├── main.py                 # FastAPI app + exception handlers
 │   ├── config.py               # Pydantic Settings
-│   ├── scraper.py              # Playwright-скрапер Namecheap
-│   ├── models.py               # Pydantic модели API
-│   └── exceptions.py           # Кастомные исключения
+│   ├── scraper.py              # Playwright Namecheap scraper
+│   ├── models.py               # Pydantic API models
+│   └── exceptions.py           # Custom exceptions
 └── tests/
     ├── __init__.py
-    ├── conftest.py             # Фикстуры pytest (event_loop, http_client)
-    └── test_api.py             # API-тесты (запускаются в Docker)
+    ├── conftest.py             # pytest fixtures (event_loop, http_client)
+    └── test_api.py             # API tests (run inside Docker)
 ```
 
 ---
 
-## 11. Требования к окружению
+## 11. Environment Requirements
 
-- Docker Engine 24.0+ и Docker Compose v2+
-- ~2 GB свободного места на диске (образ Playwright + Chromium)
-- Доступ в интернет для загрузки страниц Namecheap
-- Порт `8000` свободен на хосте (или настраивается через `.env`)
-
----
-
-## 12. Ограничения и риски
-
-| Риск | Митигация |
-|------|-----------|
-| Namecheap может изменить DOM страницы | Мониторинг через тесты CI + fallback на Aftermarket API |
-| Rate limiting / капча | 1 page + 5-секундная задержка между любыми запросами, headless-режим с реальным User-Agent |
-| Медленная загрузка страницы | Таймаут 10–15 секунд, graceful degradation до `unknown` |
-| Зависимость от внешнего сайта | Логирование ошибок, retry-механизм |
-| Playwright в Docker требует много места | Использование официального slim-образа, регулярная очистка неиспользуемых слоёв |
+- Docker Engine 24.0+ and Docker Compose v2+
+- ~2 GB free disk space (Playwright image + Firefox)
+- Internet access to load Namecheap pages
+- Port `8000` free on the host (or configurable via `.env`)
 
 ---
 
-## 13. Дальнейшее развитие (roadmap)
+## 12. Limitations and Risks
 
-- [ ] Поддержка bulk-проверки через внутренний API Namecheap Beast Mode
-- [ ] Кэширование результатов в Redis (TTL 1 час)
-- [ ] Webhook-уведомления об изменении статуса домена
-- [ ] Поддержка других регистраторов (GoDaddy, Porkbun)
-- [ ] Масштабирование через пул browser-контекстов (при сохранении rate-limit’ов)
+| Risk | Mitigation |
+|------|------------|
+| Namecheap may change the page DOM | CI test monitoring + fallback to Aftermarket API |
+| Rate limiting / CAPTCHA | 1 page + 5-second delay between any requests, headless mode with real User-Agent |
+| Slow page loading | 10–15 second timeout, graceful degradation to `unknown` |
+| Dependency on external site | Error logging, retry mechanism |
+| Playwright in Docker requires a lot of space | Use the official slim image, periodically clean unused layers |
 
 ---
 
-*Документ составлен: 2026-04-16*
-*Автор: AI Agent (Kimi CLI)*
+## 13. Future Roadmap
+
+- [ ] Bulk checking support via Namecheap Beast Mode internal API
+- [ ] Redis caching (1-hour TTL)
+- [ ] Webhook notifications on domain status change
+- [ ] Support for other registrars (GoDaddy, Porkbun)
+- [ ] Scaling via a pool of browser contexts (while keeping rate limits)
+
+---
+
+*Document created: 2026-04-16*
+*Author: AI Agent (Kimi CLI)*
