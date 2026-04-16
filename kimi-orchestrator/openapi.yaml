@@ -1,0 +1,291 @@
+openapi: 3.0.3
+info:
+  title: Kimi Orchestrator API
+  description: |
+    Express API that orchestrates Kimi Code AI domain generation and proxies
+    availability checks to the downstream domain-service.
+  version: 1.0.0
+  contact:
+    name: Nomen Team
+servers:
+  - url: http://localhost:4000
+    description: Local Docker development
+  - url: http://kimi-orchestrator:4000
+    description: Internal Docker network
+
+tags:
+  - name: Health
+    description: Service health and downstream connectivity
+  - name: Generation
+    description: AI-powered domain name generation
+  - name: Availability
+    description: Real-time domain availability checking
+
+paths:
+  /api/health:
+    get:
+      tags: [Health]
+      summary: Health check
+      description: Returns orchestrator status and downstream domain-service health.
+      responses:
+        "200":
+          description: Orchestrator is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, domainService, timestamp]
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  domainService:
+                    type: string
+                    enum: [healthy, unhealthy]
+                    example: healthy
+                  timestamp:
+                    type: string
+                    format: date-time
+                    example: "2026-04-16T12:00:00Z"
+
+  /api/generate:
+    post:
+      tags: [Generation]
+      summary: Generate domain ideas
+      description: |
+        Accepts a creative brief and returns 15–20 AI-generated domain names
+        with meaning, tone, and tags via the Kimi Code API.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Brief"
+      responses:
+        "200":
+          description: Successful generation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerateResponse"
+        "422":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal error (e.g., all Kimi API retries failed)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/check:
+    post:
+      tags: [Availability]
+      summary: Check domain availability
+      description: |
+        Checks real-time availability for a list of domains and merges
+        generation metadata (meaning, tags, etc.) when a matching brief is found.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [domains]
+              properties:
+                domains:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: string
+                  example: ["logonova.com", "brandforge.io"]
+                context:
+                  type: object
+                  properties:
+                    brief:
+                      $ref: "#/components/schemas/Brief"
+                    ideas:
+                      type: array
+                      items:
+                        $ref: "#/components/schemas/DomainIdea"
+      responses:
+        "200":
+          description: Availability results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CheckResponse"
+        "422":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+    Brief:
+      type: object
+      required:
+        - projectDescription
+        - tone
+        - lengthPreference
+        - tlds
+      properties:
+        projectDescription:
+          type: string
+          example: "AI logo generator for startups"
+        audience:
+          type: string
+          example: "founders and designers"
+        tone:
+          type: array
+          items:
+            type: string
+          example: ["tech", "modern"]
+        lengthPreference:
+          type: string
+          enum: [short, medium, long, any]
+          example: short
+        keywords:
+          type: array
+          items:
+            type: string
+          example: ["logo", "brand"]
+        exclusions:
+          type: array
+          items:
+            type: string
+          example: ["pix"]
+        tlds:
+          type: array
+          items:
+            type: string
+          example: [".com", ".io"]
+
+    DomainIdea:
+      type: object
+      required:
+        - domainName
+        - meaning
+        - whyItWorks
+        - tone
+        - tags
+      properties:
+        domainName:
+          type: string
+          example: logonova.com
+        meaning:
+          type: string
+          example: "Fusion of logo and nova — a new star for your brand"
+        whyItWorks:
+          type: string
+          example: "Short, memorable, suggests creation and freshness"
+        tone:
+          type: string
+          example: "modern tech"
+        tags:
+          type: array
+          items:
+            type: string
+          example: ["tech", "brandable", "short"]
+
+    GenerateResponse:
+      type: object
+      required:
+        - domains
+        - meta
+      properties:
+        domains:
+          type: array
+          items:
+            $ref: "#/components/schemas/DomainIdea"
+        meta:
+          type: object
+          required:
+            - generatedCount
+            - deduplicated
+          properties:
+            generatedCount:
+              type: integer
+              example: 15
+            deduplicated:
+              type: boolean
+              example: true
+
+    DomainResult:
+      allOf:
+        - $ref: "#/components/schemas/DomainIdea"
+        - type: object
+          required:
+            - domain
+            - status
+          properties:
+            domain:
+              type: string
+              example: logonova.com
+            status:
+              type: string
+              enum: [available, taken, premium, unknown]
+              example: available
+            price:
+              type: string
+              nullable: true
+              example: "$12.98"
+            currency:
+              type: string
+              nullable: true
+              example: "USD"
+            source:
+              type: string
+              example: "namecheap_page"
+
+    CheckResponse:
+      type: object
+      required:
+        - results
+        - checkedAt
+        - totalChecks
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/DomainResult"
+        checkedAt:
+          type: string
+          format: date-time
+          example: "2026-04-16T12:00:00Z"
+        totalChecks:
+          type: integer
+          example: 2
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - code
+            - message
+          properties:
+            code:
+              type: string
+              example: VALIDATION_ERROR
+            message:
+              type: string
+              example: "Invalid brief format"
+            details:
+              type: array
+              items:
+                type: object

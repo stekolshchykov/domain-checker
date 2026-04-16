@@ -1,167 +1,279 @@
-# Domain Checker API
+# Nomen — AI Domain Naming Studio
 
-HTTP API service for checking domain availability via Namecheap. Runs inside a Docker container with headless Firefox (Playwright).
+A production-minded, multi-service stack that turns domain name search into a premium AI-assisted experience.
 
-## Stack
+> **Goal:** Help founders, product teams, and creators discover brandable domain names with meaning — then check availability and pricing in real time.
 
-- **Python 3.12 + FastAPI**
-- **Playwright (headless Firefox)**
-- **Docker + Docker Compose**
-- **pytest** for testing
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Public Internet                         │
+│                          │                                  │
+│                          ▼                                  │
+│              ┌──────────────────────┐                       │
+│              │   nextjs-app (3000)  │  ← Only public port   │
+│              │   Next.js 15 + TS    │                       │
+│              └──────────┬───────────┘                       │
+│                         │ internal network                   │
+│         ┌───────────────┴───────────────┐                   │
+│         ▼                               ▼                   │
+│  ┌──────────────┐              ┌────────────────┐          │
+│  │kimi-orchestra│              │ domain-service │          │
+│  │  tor (4000)  │              │    (8000)      │          │
+│  │ Node/Express │─────────────▶│  FastAPI/py    │          │
+│  │   + Kimi API │              │  (untouched)   │          │
+│  └──────────────┘              └────────────────┘          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Services
+
+| Service | Tech | Responsibility | Public Port |
+|---------|------|----------------|-------------|
+| `nextjs-app` | Next.js 15, Tailwind, Framer Motion | Premium UI, UX flow, BFF API layer | `3000` |
+| `kimi-orchestrator` | Node.js 22, Express, TypeScript, Zod | Prompt engineering, Kimi API client, response parsing, domain-service adapter | internal only |
+| `domain-service` | Python 3.12, FastAPI, Playwright | Domain availability & pricing scraping (existing, untouched logic) | internal only |
+
+---
 
 ## Quick Start
 
+### Prerequisites
+
+- Docker & Docker Compose
+- Kimi API key (`KIMI_API_KEY`)
+
+### 1. Clone & configure
+
 ```bash
-docker-compose up --build api
+cp .env.example .env
+# Edit .env and add your KIMI_API_KEY
 ```
 
-The API will be available at `http://localhost:8000`.
+### 2. Run the full stack
 
-- **Swagger UI:** `http://localhost:8000/docs`
-- **ReDoc:** `http://localhost:8000/redoc`
+```bash
+docker compose up --build -d
+```
 
-## API Endpoints
+### 3. Open the app
 
-### `POST /check`
+Visit [http://localhost:3000](http://localhost:3000)
 
-Accepts an array of domains and returns their availability status. There is **no limit** on the number of domains — the request runs to completion.
+### 4. Run tests
+
+```bash
+# Orchestrator unit + integration tests
+cd kimi-orchestrator && npm test
+
+# Domain-service integration tests
+docker compose --profile test run --rm test
+```
+
+---
+
+## Environment Variables
+
+See `.env.example` for the full list. Key variables:
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `KIMI_API_KEY` | Yes | Your Kimi API key |
+| `KIMI_API_BASE_URL` | No | Default: `https://api.kimi.com/coding/v1` |
+| `KIMI_MODEL` | No | Default: `kimi-for-coding` |
+| `KIMI_ORCHESTRATOR_URL` | No | Internal URL for Next.js → orchestrator |
+| `DOMAIN_SERVICE_URL` | No | Internal URL for orchestrator → domain-service |
+
+---
+
+## UX Flow
+
+1. **Hero** — Enter your project idea in one sentence.
+2. **Brief Stepper** — Answer 3 quick questions (audience, tone, keywords, TLDs).
+3. **Generating** — AI crafts 15–20 brandable domain names with meanings.
+4. **Ideas** — Review cards, read the "why it works", toggle selections, apply filters.
+5. **Results** — See availability, pricing, and "Top Pick" recommendations.
+
+---
+
+## API Documentation
+
+### Kimi Orchestrator
+
+Base URL (internal): `http://kimi-orchestrator:4000`
+
+#### `GET /api/health`
+Returns orchestrator + downstream domain-service health.
+
+#### `POST /api/generate`
+Generates domain ideas from a brief.
 
 **Request:**
 ```json
 {
-  "domains": ["google.com", "knowflow.com"]
+  "projectDescription": "AI logo generator for startups",
+  "audience": "founders and designers",
+  "tone": ["tech", "modern"],
+  "lengthPreference": "short",
+  "keywords": ["logo", "brand"],
+  "exclusions": ["pix"],
+  "tlds": [".com", ".io"]
 }
 ```
 
-**Response 200 OK:**
+**Response:**
+```json
+{
+  "domains": [
+    {
+      "domainName": "logonova.com",
+      "meaning": "Fusion of logo and nova — a new star for your brand",
+      "whyItWorks": "Short, memorable, suggests creation and freshness",
+      "tone": "modern tech",
+      "tags": ["tech", "brandable", "short"]
+    }
+  ],
+  "meta": { "generatedCount": 42, "deduplicated": true }
+}
+```
+
+#### `POST /api/check`
+Checks availability for selected domains and merges generation context.
+
+**Request:**
+```json
+{
+  "domains": ["logonova.com", "brandforge.io"],
+  "context": { "brief": { ... }, "ideas": [ ... ] }
+}
+```
+
+**Response:**
 ```json
 {
   "results": [
     {
-      "domain": "google.com",
-      "status": "taken",
-      "price": null,
-      "currency": null,
-      "source": "namecheap_page"
-    },
-    {
-      "domain": "knowflow.com",
-      "status": "premium",
-      "price": "€8,842.53",
-      "currency": "EUR",
-      "source": "namecheap_page"
+      "domain": "logonova.com",
+      "status": "available",
+      "price": "$12.98",
+      "meaning": "...",
+      "tags": ["tech"]
     }
   ],
-  "checked_at": "2026-04-16T11:31:30Z",
-  "total_checks": 2
+  "checkedAt": "2026-04-16T12:00:00Z",
+  "totalChecks": 2
 }
 ```
 
-#### Possible Domain Statuses
+### Domain Service (existing)
 
-| Status | Description | Example Price |
-|--------|-------------|---------------|
-| `available` | Domain is free for registration | `€9.33/yr` |
-| `taken` | Domain is already registered | `null` |
-| `premium` | Domain is available but premium | `€8,842.53` |
-| `unknown` | Could not determine status | `null` |
+Base URL (internal): `http://domain-service:8000`
 
-#### Response Examples for Different Scenarios
-
-**Available domain:**
-```json
-{
-  "domain": "qwertyuiop12345abc.com",
-  "status": "available",
-  "price": "€9.33/yr",
-  "currency": "EUR",
-  "source": "namecheap_page"
-}
-```
-
-**Taken domain:**
-```json
-{
-  "domain": "google.com",
-  "status": "taken",
-  "price": null,
-  "currency": null,
-  "source": "namecheap_page"
-}
-```
-
-**Non-existent TLD (valid format):**
-```json
-{
-  "domain": "nonexistent-tld-12345.zzz",
-  "status": "available",
-  "price": null,
-  "currency": null,
-  "source": "aftermarket_api"
-}
-```
-
-### `GET /health`
-
-Health check with browser readiness verification.
-
-**Response 200 OK:**
+#### `GET /health`
 ```json
 {
   "status": "ok",
   "browser_ready": true,
-  "timestamp": "2026-04-16T11:30:17Z"
+  "timestamp": "2026-04-16T12:00:00Z"
 }
 ```
 
-## HTTP Response Codes
-
-| Code | Scenario |
-|------|----------|
-| `200 OK` | Successful domain check or health check |
-| `400 Bad Request` | Invalid JSON or missing required field |
-| `422 Unprocessable Entity` | Validation error: empty list, invalid domain format |
-| `429 Too Many Requests` | Rate limit exceeded (rare due to internal throttling) |
-| `500 Internal Server Error` | Unexpected error |
-| `503 Service Unavailable` | Browser is not ready |
-
-## Domain Validation
-
-The API validates the format of each domain **before** opening the browser. The following are rejected with `422`:
-
-- `not_a_domain` — no dot
-- `domain with spaces` — contains spaces
-- `test.` — ends with a dot
-- `-example.com` — starts with a hyphen
-- `example-.com` — hyphen before the dot
-- `[]` / `null` — empty list or non-string
-
-If the format is valid but the TLD does not exist, the API returns `available` based on the Namecheap Aftermarket API.
-
-## How It Works
-
-- **Rate limiting:** a strict **5-second** pause between any two domain checks. For example, 10 domains will take at least **45 seconds**.
-- **Page reuse:** multiple domains in a single request are checked sequentially in **one Firefox tab** without recreation.
-- **Fallback:** if the Namecheap page is unavailable or lacks data, the Aftermarket API is used.
-- **No connection timeout:** the server does not drop the HTTP connection regardless of how long the check takes.
-
-## Testing (Docker only)
-
-```bash
-docker-compose --profile test run --rm test
+#### `POST /check`
+**Request:**
+```json
+{ "domains": ["example.com"] }
 ```
 
-Currently there are **16 tests**, including:
-- taken, available, and premium domains
-- validation of empty and invalid domains
-- rate-limiting verification (≥5 seconds between domains)
-- page reuse verification
+**Response:**
+```json
+{
+  "results": [
+    {
+      "domain": "example.com",
+      "status": "available",
+      "price": "$12.98",
+      "currency": "USD",
+      "source": "namecheap_page"
+    }
+  ],
+  "checked_at": "2026-04-16T12:00:00Z",
+  "total_checks": 1
+}
+```
 
-## Environment Variables
+**Statuses:** `available` | `taken` | `premium` | `unknown`
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `PLAYWRIGHT_HEADLESS` | Run browser in headless mode | `true` |
-| `RATE_LIMIT_SECONDS` | Minimum interval between checks | `5.0` |
-| `PAGE_TIMEOUT_MS` | Page load timeout for a single domain | `15000` |
-| `LONG_HEALTH_CHECK_DOMAIN` | Long domain used for tests | `this-is-very-long-health-check-domain-name-test-1234567890.com` |
+**Errors (unified envelope):**
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Request validation failed",
+    "details": [...]
+  }
+}
+```
+
+---
+
+## Project Structure
+
+```
+domain-checker/
+├── domain-service/          # Existing FastAPI + Playwright service
+│   ├── src/
+│   ├── tests/
+│   ├── Dockerfile
+│   └── pyproject.toml
+├── kimi-orchestrator/       # New Node.js orchestrator
+│   ├── src/
+│   │   ├── routes/
+│   │   ├── services/
+│   │   ├── prompts/
+│   │   └── types/
+│   ├── tests/
+│   ├── Dockerfile
+│   └── package.json
+├── nextjs-app/              # New Next.js 15 frontend
+│   ├── app/
+│   ├── components/
+│   ├── lib/
+│   ├── public/
+│   ├── Dockerfile
+│   └── package.json
+├── docker-compose.yml
+├── .env.example
+└── README.md
+```
+
+---
+
+## Design Philosophy
+
+- **Preserve & extend** — the existing domain checker is untouched; we only wrapped it.
+- **Security first** — only the Next.js frontend is exposed publicly.
+- **Premium UX** — dark aurora theme, glass cards, motion design, zero clutter.
+- **Resilient AI layer** — retries, JSON extraction fallback, strict Zod validation, deduplication.
+- **Tested** — unit tests for parsing/prompts, integration tests for API contracts, e2e smoke scenarios.
+
+---
+
+## Known Limitations & Next Steps
+
+- **Rate limiting:** Domain checks enforce a 5-second delay between lookups. Large batches are handled sequentially with a progress UI.
+- **Kimi latency:** Generation can take 10–30 seconds. The UI shows animated progress states.
+- **Future ideas:**
+  - Saved shortlists / session history
+  - Export results (CSV, PDF)
+  - Compare TLD pricing side-by-side
+  - Regenerate from favorites
+  - Logo / slogan generation expansion
+
+---
+
+## License
+
+MIT (or as specified by the project owner)

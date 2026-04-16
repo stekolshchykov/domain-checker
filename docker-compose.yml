@@ -1,10 +1,12 @@
 version: "3.9"
 
 services:
-  api:
-    build: .
-    ports:
-      - "8000:8000"
+  domain-service:
+    build:
+      context: ./domain-service
+      dockerfile: Dockerfile
+    expose:
+      - "8000"
     environment:
       - APP_ENV=production
       - PLAYWRIGHT_HEADLESS=true
@@ -15,17 +17,63 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    networks:
+      - app-network
 
+  kimi-orchestrator:
+    build:
+      context: ./kimi-orchestrator
+      dockerfile: Dockerfile
+    expose:
+      - "4000"
+    environment:
+      - PORT=4000
+      - KIMI_API_KEY=${KIMI_API_KEY}
+      - KIMI_API_BASE_URL=${KIMI_API_BASE_URL:-https://api.moonshot.cn/v1}
+      - KIMI_MODEL=${KIMI_MODEL:-kimi-k2-0711-preview}
+      - KIMI_MOCK_RESPONSE=${KIMI_MOCK_RESPONSE:-false}
+      - DOMAIN_SERVICE_URL=http://domain-service:8000
+      - KIMI_REQUEST_TIMEOUT_MS=60000
+      - KIMI_MAX_RETRIES=2
+    depends_on:
+      domain-service:
+        condition: service_healthy
+    networks:
+      - app-network
+
+  nextjs-app:
+    build:
+      context: ./nextjs-app
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - KIMI_ORCHESTRATOR_URL=http://kimi-orchestrator:4000
+    depends_on:
+      - kimi-orchestrator
+    networks:
+      - app-network
+
+  # Test runner for the existing domain service
   test:
-    build: .
+    build:
+      context: ./domain-service
+      dockerfile: Dockerfile
     environment:
       - APP_ENV=test
       - PLAYWRIGHT_HEADLESS=true
       - RATE_LIMIT_SECONDS=5.0
-      - TEST_BASE_URL=http://api:8000
-    command: ["pytest", "-v", "tests/"]
+      - TEST_BASE_URL=http://domain-service:8000
+    command: ["sh", "-c", "PYTHONPATH=/app pytest -v tests/"]
     depends_on:
-      api:
+      domain-service:
         condition: service_healthy
     profiles:
       - test
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge

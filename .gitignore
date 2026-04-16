@@ -1,2 +1,41 @@
+# Secrets
+.env
+.env.local
+.env.*.local
+
+# Kimi / IDE
 .kimi/
 .playwright-mcp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Node.js (all nested projects)
+**/node_modules/
+**/package-lock.json
+**/yarn.lock
+**/pnpm-lock.yaml
+
+# Next.js
+**/.next/
+**/out/
+**/build/
+
+# TypeScript
+**/*.tsbuildinfo
+
+# Orchestrator builds
+**/dist/
+
+# Testing
+**/coverage/
+**/.nyc_output/
+
+# IDE
+.vscode/
+.idea/
+*.sw?

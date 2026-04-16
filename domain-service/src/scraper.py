@@ -14,9 +14,14 @@ class RateLimitedScraper:
         self._playwright = None
         self._browser: Optional[Browser] = None
         self._page: Optional[Page] = None
-        self._lock = asyncio.Lock()
+        self._lock: Optional[asyncio.Lock] = None
         self._last_request_at = 0.0
         self._client = httpx.AsyncClient(timeout=10.0)
+
+    def _get_lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     async def start(self) -> None:
         self._playwright = await async_playwright().start()
@@ -55,7 +60,7 @@ class RateLimitedScraper:
         self._last_request_at = time.monotonic()
 
     async def check_domains(self, domains: List[str]) -> List[DomainCheckResult]:
-        async with self._lock:
+        async with self._get_lock():
             results = []
             page = await self._ensure_page()
             for domain in domains:

@@ -1,3 +1,4 @@
+import os
 import time
 
 import pytest
@@ -129,6 +130,7 @@ async def test_check_rate_limit_between_domains(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(bool(os.getenv("TEST_BASE_URL")), reason="Requires direct ASGI access to scraper internals")
 async def test_check_page_reuse(client):
     # First request creates the page
     response = await client.post("/check", json={"domains": ["google.com"]})
