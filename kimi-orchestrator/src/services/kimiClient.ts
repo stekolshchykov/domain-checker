@@ -80,34 +80,128 @@ async function callKimi(messages: KimiMessage[], attempt: number): Promise<KimiR
   }
 }
 
-const MOCK_PALETTE = ["#0F172A", "#6366F1", "#22D3EE", "#F8FAFC", "#94A3B8"];
-const MOCK_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="40" fill="#6366F1"/></svg>`;
+const MOCK_PALETTES = [
+  ["#0F172A", "#6366F1", "#22D3EE", "#F8FAFC", "#94A3B8"],
+  ["#1A0B2E", "#FF4ECD", "#7B61FF", "#F3F0FF", "#B8B2D1"],
+  ["#0D1F2D", "#2EC4B6", "#E71D36", "#FDFFFC", "#A8B2C1"],
+  ["#1C1C1E", "#F5A623", "#4A90E2", "#F8F8F8", "#9B9B9B"],
+  ["#121212", "#00D9FF", "#FF0055", "#EAEAEA", "#8E8E93"],
+];
 
-const MOCK_DOMAINS: GenerateResponse = {
-  domains: Array.from({ length: 12 }).map((_, i) => ({
-    domainName: `novaforge${i === 0 ? "" : i}.com`,
-    meaning: "Combines newness and creation energy",
-    whyItWorks: "Strong, memorable, tech-forward, brandable",
-    tone: "modern premium",
-    tags: ["tech", "brandable", "strong", "global"],
-  })),
-  colorPalette: MOCK_PALETTE,
-  logos: Array.from({ length: 5 }).map(() => MOCK_SVG),
-  meta: { generatedCount: 12, deduplicated: true },
-};
+function makeMockSvg(index: number, color: string): string {
+  const shapes = [
+    `<circle cx="50" cy="50" r="40" fill="${color}"/>`,
+    `<rect x="15" y="15" width="70" height="70" rx="18" fill="${color}"/>`,
+    `<polygon points="50,10 90,90 10,90" fill="${color}"/>`,
+    `<path d="M10,50 Q30,10 50,50 T90,50" stroke="${color}" stroke-width="12" fill="none"/>`,
+    `<circle cx="50" cy="50" r="35" fill="none" stroke="${color}" stroke-width="10"/><circle cx="50" cy="50" r="15" fill="${color}"/>`,
+  ];
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">${shapes[index % shapes.length]}</svg>`;
+}
+
+const PREFIXES = [
+  "nova", "flux", "zen", "bolt", "nexus", "loom", "orbit", "spark", "cipher",
+  "drift", "pulse", "aura", "echo", "glyph", "prism", "verge", "fable", "quark",
+  "neon", "vox", "synth", "haven", "rift", "cinder", "myth", "ember",
+];
+
+const SUFFIXES = [
+  "forge", "lab", "io", "hub", "ly", "ify", "scape", "works", "node", "path",
+  "base", "flow", "cast", "loom", "bits", "deck", "verse", "trail", "spark",
+  "field", "kit", "tap", "nest", "grid", "lane",
+];
+
+const TONES = [
+  "modern premium", "playful tech", "minimal elegant", "bold corporate",
+  "friendly creative", "futuristic clean", "warm artisan", "sharp professional",
+];
+
+const TAG_POOLS = [
+  ["tech", "brandable", "short", "global"],
+  ["creative", "modern", "memorable", "clean"],
+  ["premium", "sleek", "professional", "trustworthy"],
+  ["playful", "friendly", "approachable", "fresh"],
+  ["innovative", "futuristic", "dynamic", "smart"],
+];
+
+function hashString(str: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h += (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24);
+  }
+  return Math.abs(h);
+}
+
+function seededRand(seed: number): number {
+  const x = Math.sin(seed) * 10000;
+  return x - Math.floor(x);
+}
+
+function pick<T>(arr: T[], seed: number): T {
+  return arr[Math.floor(seededRand(seed) * arr.length)];
+}
+
+function buildMockName(seed: number, tlds: string[]): string {
+  const prefix = pick(PREFIXES, seed);
+  const suffix = pick(SUFFIXES, seed + 1);
+  const tld = tlds.length ? pick(tlds, seed + 2) : ".com";
+  const combo = `${prefix}${suffix}`;
+  return `${combo}${tld}`;
+}
+
+function capitalize(word: string): string {
+  return word.charAt(0).toUpperCase() + word.slice(1);
+}
+
+function buildMockDomains(brief: Brief): GenerateResponse {
+  const rawSeed = hashString(brief.projectDescription + (brief.keywords?.join("") ?? ""));
+  const tlds = brief.tlds?.length ? brief.tlds : [".com"];
+  const palette = pick(MOCK_PALETTES, rawSeed);
+  const brandColor = palette[1];
+
+  const used = new Set<string>();
+  const domains: DomainIdea[] = [];
+
+  for (let i = 0; i < 12; i++) {
+    const seed = rawSeed + i * 31;
+    let name = buildMockName(seed, tlds);
+    let attempts = 0;
+    while (used.has(name) && attempts < 10) {
+      name = buildMockName(seed + attempts + 100, tlds);
+      attempts++;
+    }
+    used.add(name);
+
+    const base = name.split(".")[0];
+    const tone = pick(TONES, seed + 3);
+    const tags = pick(TAG_POOLS, seed + 4);
+    const prefix = pick(PREFIXES, seed);
+    const suffix = pick(SUFFIXES, seed + 1);
+
+    domains.push({
+      domainName: name,
+      meaning: `Blends "${prefix}" and "${suffix}" to evoke ${tone} energy around ${brief.keywords?.[0] || brief.projectDescription.split(" ")[0] || "your idea"}.`,
+      whyItWorks: `${capitalize(base)} is ${pick(["short", "crisp", "snappy", "smooth"], seed + 5)}, easy to pronounce globally, and feels ${tone}.`,
+      tone,
+      tags: [...tags],
+    });
+  }
+
+  const logos = Array.from({ length: 5 }).map((_, i) => makeMockSvg(i + rawSeed, brandColor));
+
+  return {
+    domains,
+    colorPalette: palette,
+    logos,
+    meta: { generatedCount: domains.length, deduplicated: true },
+  };
+}
 
 export async function generateDomains(brief: Brief): Promise<GenerateResponse> {
   if (process.env.KIMI_MOCK_RESPONSE === "true") {
     await sleep(1500);
-    return {
-      domains: MOCK_DOMAINS.domains.map((d, i) => ({
-        ...d,
-        domainName: `${brief.projectDescription.slice(0, 6).replace(/\s+/g, "").toLowerCase() || "brand"}${i}.com`,
-      })),
-      colorPalette: MOCK_PALETTE,
-      logos: Array.from({ length: 5 }).map(() => MOCK_SVG),
-      meta: { generatedCount: 12, deduplicated: true },
-    };
+    return buildMockDomains(brief);
   }
 
   const messages: KimiMessage[] = [
