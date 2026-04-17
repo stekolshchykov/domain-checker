@@ -1,305 +1,221 @@
+import asyncio
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Optional
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+import pytest_asyncio
 
+from src.models import FinalStatus, PriceOption, ProviderResult
 from src.scraper import MultiRegistrarChecker
-from src.models import DomainCheckResult, PriceOption
 
 
-@pytest.fixture
-def checker():
-    checker = MultiRegistrarChecker()
-    # Replace real adapters with controllable mocks
-    checker._namecheap = MagicMock()
-    checker._namecheap.name = "namecheap"
+@dataclass
+class StubAdapter:
+    name: str
+    result: Optional[ProviderResult] = None
+    error: Optional[Exception] = None
+
+    async def check_domain(self, domain: str) -> ProviderResult:
+        if self.error:
+            raise self.error
+        assert self.result is not None
+        return self.result
+
+    def build_source_url(self, domain: str) -> str:
+        return f"https://{self.name}.test/search?domain={domain}"
+
+    def _error_result(self, **kwargs) -> ProviderResult:
+        now = datetime.now(timezone.utc)
+        return ProviderResult(
+            registrar=self.name,
+            domain=kwargs["domain"],
+            status="unknown",
+            final_status=kwargs["final_status"],
+            source=self.name,
+            source_url=kwargs.get("source_url"),
+            checked_at=now,
+            detail=kwargs.get("detail"),
+            confidence=0.1,
+            prices=[],
+            debug=None,
+        )
+
+
+@pytest_asyncio.fixture
+async def checker():
+    c = MultiRegistrarChecker(max_concurrent_domains=4)
+    yield c
+    await c.stop()
+
+
+def _provider(
+    registrar: str,
+    final_status: FinalStatus,
+    *,
+    confidence: float = 0.8,
+    price: str | None = None,
+) -> ProviderResult:
+    option = PriceOption(
+        source=registrar,
+        status=final_status,
+        price=price,
+        currency="USD" if price else None,
+        link=f"https://{registrar}.test",
+    )
+    return ProviderResult(
+        registrar=registrar,
+        domain="example.com",
+        status="available" if final_status in {FinalStatus.AVAILABLE, FinalStatus.STANDARD_PRICE, FinalStatus.DISCOUNTED} else "taken" if final_status in {FinalStatus.UNAVAILABLE, FinalStatus.TRANSFER_ONLY} else "premium" if final_status == FinalStatus.PREMIUM else "unknown",
+        final_status=final_status,
+        registration_price=price,
+        currency="USD" if price else None,
+        source=registrar,
+        source_url=f"https://{registrar}.test",
+        detail=f"{registrar}: {final_status.value}",
+        confidence=confidence,
+        prices=[option],
+        debug=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_aggregate_prefers_available_family(checker):
     checker._adapters = [
-        checker._namecheap,
-        MagicMock(),
-        MagicMock(),
-        MagicMock(),
+        StubAdapter("namecheap", _provider("namecheap", FinalStatus.STANDARD_PRICE, price="$10.00")),
+        StubAdapter("godaddy", _provider("godaddy", FinalStatus.UNAVAILABLE)),
+        StubAdapter("dynadot", _provider("dynadot", FinalStatus.AVAILABLE, price="$9.00")),
     ]
-    for i, name in enumerate(["namecheap", "godaddy", "letshost", "cloudflare"]):
-        checker._adapters[i].name = name
-    return checker
-
-
-# --- start / stop ---
-
-@pytest.mark.asyncio
-async def test_checker_start_starts_namecheap(checker):
-    checker._namecheap.start = AsyncMock()
-    await checker.start()
-    checker._namecheap.start.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_checker_stop_stops_namecheap_and_others(checker):
-    checker._namecheap.stop = AsyncMock()
-    checker._namecheap._client = MagicMock()
-    checker._namecheap._client.aclose = AsyncMock()
-
-    for adapter in checker._adapters[1:]:
-        adapter._client = MagicMock()
-        adapter._client.aclose = AsyncMock()
-
-    await checker.stop()
-    checker._namecheap.stop.assert_awaited_once()
-    for adapter in checker._adapters[1:]:
-        adapter._client.aclose.assert_awaited_once()
-
-
-# --- status aggregation with Namecheap authoritative ---
-
-@pytest.mark.asyncio
-async def test_aggregate_uses_namecheap_status_available_over_godaddy_taken(checker):
-    checker._namecheap.check_domain = AsyncMock(return_value=DomainCheckResult(
-        domain="example.com", status="available", source="namecheap_page", prices=[]
-    ))
-    checker._adapters[1].check_domain = AsyncMock(return_value=DomainCheckResult(
-        domain="example.com", status="taken", source="godaddy_api", prices=[]
-    ))
-    checker._adapters[2].check_domain = AsyncMock(return_value=DomainCheckResult(
-        domain="example.com", status="unknown", source="letshost", prices=[]
-    ))
-    checker._adapters[3].check_domain = AsyncMock(return_value=DomainCheckResult(
-        domain="example.com", status="taken", source="cloudflare_api", prices=[]
-    ))
 
     result = await checker._check_domain_parallel("example.com")
     assert result.status == "available"
-    assert result.source == "aggregated"
+    assert result.final_status in {FinalStatus.AVAILABLE, FinalStatus.STANDARD_PRICE}
+    assert result.price == "$9.00"
 
 
 @pytest.mark.asyncio
-async def test_aggregate_uses_namecheap_status_premium(checker):
-    checker._namecheap.check_domain = AsyncMock(return_value=DomainCheckResult(
-        domain="example.com", status="premium", price="$1,000", currency="USD", source="namecheap_page", prices=[]
-    ))
-    for adapter in checker._adapters[1:]:
-        adapter.check_domain = AsyncMock(return_value=DomainCheckResult(
-            domain="example.com", status="taken", source="other", prices=[]
-        ))
+async def test_aggregate_conflicting_consensus_is_unknown(checker):
+    checker._adapters = [
+        StubAdapter("namecheap", _provider("namecheap", FinalStatus.AVAILABLE, confidence=0.7)),
+        StubAdapter("godaddy", _provider("godaddy", FinalStatus.UNAVAILABLE, confidence=0.68)),
+    ]
 
     result = await checker._check_domain_parallel("example.com")
-    assert result.status == "premium"
-    assert result.price == "$1,000"
-
-
-@pytest.mark.asyncio
-async def test_aggregate_uses_namecheap_status_taken(checker):
-    checker._namecheap.check_domain = AsyncMock(return_value=DomainCheckResult(
-        domain="example.com", status="taken", source="namecheap_page", prices=[]
-    ))
-    for adapter in checker._adapters[1:]:
-        adapter.check_domain = AsyncMock(return_value=DomainCheckResult(
-            domain="example.com", status="available", source="other", prices=[]
-        ))
-
-    result = await checker._check_domain_parallel("example.com")
-    assert result.status == "taken"
-
-
-@pytest.mark.asyncio
-async def test_aggregate_fallback_when_namecheap_unknown(checker):
-    checker._namecheap.check_domain = AsyncMock(return_value=DomainCheckResult(
-        domain="example.com", status="unknown", source="namecheap_page", prices=[]
-    ))
-    checker._adapters[1].check_domain = AsyncMock(return_value=DomainCheckResult(
-        domain="example.com", status="taken", source="godaddy_api", prices=[]
-    ))
-    checker._adapters[2].check_domain = AsyncMock(return_value=DomainCheckResult(
-        domain="example.com", status="available", source="letshost", prices=[]
-    ))
-    checker._adapters[3].check_domain = AsyncMock(return_value=DomainCheckResult(
-        domain="example.com", status="unknown", source="cloudflare_api", prices=[]
-    ))
-
-    result = await checker._check_domain_parallel("example.com")
-    # Fallback logic: taken > premium > available > unknown
-    assert result.status == "taken"
-
-
-def test_aggregate_fallback_when_namecheap_missing():
-    checker = MultiRegistrarChecker()
-    # Simulate no namecheap by setting it to None
-    checker._namecheap = None
-    result = checker._aggregate_results(
-        "example.com",
-        [
-            DomainCheckResult(domain="example.com", status="available", source="godaddy_api", prices=[]),
-            DomainCheckResult(domain="example.com", status="unknown", source="letshost", prices=[]),
-            DomainCheckResult(domain="example.com", status="unknown", source="cloudflare_api", prices=[]),
-        ],
-        [],
-    )
-    assert result.status == "available"
-
-
-# --- price aggregation ---
-
-@pytest.mark.asyncio
-async def test_aggregate_collects_all_prices(checker):
-    checker._namecheap.check_domain = AsyncMock(return_value=DomainCheckResult(
-        domain="example.com",
-        status="available",
-        source="namecheap_page",
-        price="$8.98",
-        currency="USD",
-        prices=[PriceOption(source="namecheap", price="$8.98", currency="USD", link="nc")],
-    ))
-    checker._adapters[1].check_domain = AsyncMock(return_value=DomainCheckResult(
-        domain="example.com",
-        status="taken",
-        source="godaddy_api",
-        price="$11.99",
-        currency="USD",
-        prices=[PriceOption(source="godaddy", price="$11.99", currency="USD", link="gd")],
-    ))
-    checker._adapters[2].check_domain = AsyncMock(return_value=DomainCheckResult(
-        domain="example.com",
-        status="unknown",
-        source="letshost",
-        prices=[PriceOption(source="letshost", price="€9.99", currency="EUR", link="lh")],
-    ))
-    checker._adapters[3].check_domain = AsyncMock(return_value=DomainCheckResult(
-        domain="example.com",
-        status="taken",
-        source="cloudflare_api",
-        price="$9.15",
-        currency="USD",
-        prices=[PriceOption(source="cloudflare", price="$9.15", currency="USD", link="cf")],
-    ))
-
-    result = await checker._check_domain_parallel("example.com")
-    sources = {p.source: p for p in result.prices}
-    assert "namecheap" in sources
-    assert "godaddy" in sources
-    assert "letshost" in sources
-    assert "cloudflare" in sources
-    assert sources["letshost"].currency == "EUR"
-
-
-def test_aggregate_deduplicates_prices_by_source_and_price(checker):
-    result = checker._aggregate_results(
-        "example.com",
-        [
-            DomainCheckResult(
-                domain="example.com",
-                status="available",
-                source="namecheap_page",
-                prices=[
-                    PriceOption(source="namecheap", price="$8.98", link="a"),
-                    PriceOption(source="namecheap", price="$8.98", link="b"),  # duplicate
-                ],
-            ),
-        ],
-        [],
-    )
-    assert len(result.prices) == 1
-
-
-@pytest.mark.asyncio
-async def test_aggregate_best_price_for_namecheap_status(checker):
-    checker._namecheap.check_domain = AsyncMock(return_value=DomainCheckResult(
-        domain="example.com",
-        status="available",
-        source="namecheap_page",
-        price="$8.98",
-        prices=[PriceOption(source="namecheap", price="$8.98")],
-    ))
-    checker._adapters[1].check_domain = AsyncMock(return_value=DomainCheckResult(
-        domain="example.com",
-        status="taken",
-        source="godaddy_api",
-        price="$11.99",
-        prices=[PriceOption(source="godaddy", price="$11.99")],
-    ))
-    checker._adapters[2].check_domain = AsyncMock(return_value=DomainCheckResult(
-        domain="example.com",
-        status="unknown",
-        source="letshost",
-        prices=[],
-    ))
-    checker._adapters[3].check_domain = AsyncMock(return_value=DomainCheckResult(
-        domain="example.com",
-        status="available",
-        source="cloudflare_api",
-        price="$9.15",
-        prices=[PriceOption(source="cloudflare", price="$9.15")],
-    ))
-
-    result = await checker._check_domain_parallel("example.com")
-    # Namecheap says available, so best price should come from an available result
-    assert result.price == "$8.98"
-
-
-# --- exception handling in parallel ---
-
-@pytest.mark.asyncio
-async def test_aggregate_one_adapter_fails_others_succeed(checker):
-    checker._namecheap.check_domain = AsyncMock(return_value=DomainCheckResult(
-        domain="example.com", status="available", source="namecheap_page", prices=[]
-    ))
-    checker._adapters[1].check_domain = AsyncMock(side_effect=Exception("godaddy down"))
-    checker._adapters[2].check_domain = AsyncMock(return_value=DomainCheckResult(
-        domain="example.com", status="unknown", source="letshost", prices=[]
-    ))
-    checker._adapters[3].check_domain = AsyncMock(return_value=DomainCheckResult(
-        domain="example.com", status="unknown", source="cloudflare_api", prices=[]
-    ))
-
-    result = await checker._check_domain_parallel("example.com")
-    assert result.status == "available"
-    assert "godaddy down" in result.detail
-
-
-@pytest.mark.asyncio
-async def test_aggregate_all_adapters_fail_returns_unknown(checker):
-    for adapter in checker._adapters:
-        adapter.check_domain = AsyncMock(side_effect=Exception("network error"))
-
-    result = await checker._check_domain_parallel("example.com")
+    assert result.final_status == FinalStatus.UNKNOWN
     assert result.status == "unknown"
-    # _run_adapter wraps exceptions into DomainCheckResult objects,
-    # so the aggregate detail contains the error messages from each adapter.
-    assert "network error" in result.detail
-    # The aggregator infers purchase links even for adapters that failed,
-    # so prices may contain links from each registrar.
+    assert result.note == "ambiguous provider consensus"
 
-
-# --- legacy single-price inference ---
 
 @pytest.mark.asyncio
-async def test_aggregate_infers_link_for_legacy_single_price(checker):
-    result = checker._aggregate_results(
-        "example.com",
-        [
-            DomainCheckResult(
-                domain="example.com",
-                status="available",
-                source="godaddy_api",
-                price="$11.99",
-                prices=[],
-            ),
-        ],
-        [],
+async def test_aggregate_degrades_weak_decisive_to_operational(checker):
+    checker._adapters = [
+        StubAdapter("one", _provider("one", FinalStatus.PREMIUM, confidence=0.25)),
+        StubAdapter("two", _provider("two", FinalStatus.BLOCKED, confidence=0.7)),
+        StubAdapter("three", _provider("three", FinalStatus.UNKNOWN, confidence=0.1)),
+    ]
+
+    result = await checker._check_domain_parallel("example.com")
+    assert result.final_status == FinalStatus.BLOCKED
+    assert result.status == "unknown"
+    assert result.note == "decisive signal too weak; operational consensus"
+
+
+@pytest.mark.asyncio
+async def test_aggregate_mixed_operational_without_decisive_returns_unknown(checker):
+    checker._adapters = [
+        StubAdapter("one", _provider("one", FinalStatus.BLOCKED, confidence=0.35)),
+        StubAdapter("two", _provider("two", FinalStatus.PARSING_FAILED, confidence=0.35)),
+        StubAdapter("three", _provider("three", FinalStatus.UNKNOWN, confidence=0.3)),
+    ]
+
+    result = await checker._check_domain_parallel("example.com")
+    assert result.final_status == FinalStatus.UNKNOWN
+    assert result.status == "unknown"
+    assert result.note == "operational signals mixed"
+
+
+@pytest.mark.asyncio
+async def test_aggregate_uses_provider_reliability_weight(checker):
+    checker._provider_reliability["reliable"] = 1.0
+    checker._provider_reliability["noisy"] = 0.2
+    checker._adapters = [
+        StubAdapter("reliable", _provider("reliable", FinalStatus.AVAILABLE, confidence=0.45)),
+        StubAdapter("noisy", _provider("noisy", FinalStatus.UNAVAILABLE, confidence=0.8)),
+    ]
+
+    result = await checker._check_domain_parallel("example.com")
+    assert result.final_status == FinalStatus.AVAILABLE
+    assert result.status == "available"
+
+
+@pytest.mark.asyncio
+async def test_provider_reliability_degrades_on_parsing_failed(checker):
+    checker._provider_reliability["flaky"] = 1.0
+    updated = await checker._record_provider_outcome("flaky", FinalStatus.PARSING_FAILED)
+    assert updated < 1.0
+    assert checker._provider_reliability["flaky"] == updated
+
+
+@pytest.mark.asyncio
+async def test_aggregate_unavailable_maps_to_taken(checker):
+    checker._adapters = [
+        StubAdapter("namecheap", _provider("namecheap", FinalStatus.UNAVAILABLE)),
+        StubAdapter("godaddy", _provider("godaddy", FinalStatus.UNAVAILABLE)),
+    ]
+
+    result = await checker._check_domain_parallel("example.com")
+    assert result.final_status == FinalStatus.UNAVAILABLE
+    assert result.status == "taken"
+
+
+@pytest.mark.asyncio
+async def test_aggregate_dedupes_prices_and_keeps_provider_results(checker):
+    p = _provider("namecheap", FinalStatus.STANDARD_PRICE, price="$10.00")
+    p.prices.append(
+        PriceOption(source="namecheap", status=FinalStatus.STANDARD_PRICE, price="$10.00", link="https://namecheap.test")
     )
-    assert len(result.prices) == 1
-    assert result.prices[0].source == "godaddy"
-    assert result.prices[0].link is not None
-    assert "godaddy" in result.prices[0].link
+    checker._adapters = [
+        StubAdapter("namecheap", p),
+        StubAdapter("godaddy", _provider("godaddy", FinalStatus.STANDARD_PRICE, price="$12.00")),
+    ]
+
+    result = await checker._check_domain_parallel("example.com")
+    assert len(result.prices) == 2
+    assert len(result.provider_results) == 2
 
 
-# --- is_ready ---
+@pytest.mark.asyncio
+async def test_run_adapter_exception_returns_unknown_provider_result(checker):
+    adapter = StubAdapter("broken", error=RuntimeError("boom"))
+    result = await checker._run_adapter(adapter, "example.com")
+    assert result.final_status == FinalStatus.UNKNOWN
+    assert "boom" in (result.detail or "")
 
-def test_checker_is_ready_delegates_to_namecheap(checker):
-    checker._namecheap.is_ready.return_value = True
-    assert checker.is_ready() is True
-    checker._namecheap.is_ready.return_value = False
-    assert checker.is_ready() is False
+
+@pytest.mark.asyncio
+async def test_check_domains_processes_multiple_domains(checker):
+    checker._adapters = [
+        StubAdapter("namecheap", _provider("namecheap", FinalStatus.AVAILABLE, price="$8.00")),
+    ]
+    results = await checker.check_domains(["a-example.com", "b-example.com", "c-example.com"])
+    assert len(results) == 3
+    assert all(r.status == "available" for r in results)
 
 
-def test_checker_is_ready_without_namecheap():
-    checker = MultiRegistrarChecker()
-    checker._namecheap = None
-    checker._adapters = []
-    assert checker.is_ready() is True
+@pytest.mark.asyncio
+async def test_domain_semaphore_limits_parallel_domain_runs(monkeypatch):
+    checker = MultiRegistrarChecker(max_concurrent_domains=1)
+
+    class SlowAdapter(StubAdapter):
+        async def check_domain(self, domain: str) -> ProviderResult:
+            await asyncio.sleep(0.05)
+            return _provider(self.name, FinalStatus.AVAILABLE, price="$10.00")
+
+    checker._adapters = [SlowAdapter("slow")]
+
+    start = asyncio.get_event_loop().time()
+    await checker.check_domains(["one.com", "two.com"])
+    elapsed = asyncio.get_event_loop().time() - start
+    await checker.stop()
+
+    assert elapsed >= 0.09

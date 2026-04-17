@@ -66,7 +66,7 @@ function validateCheckResponse(data: unknown): CheckResponse {
     price: z.string().nullable().optional(),
     currency: z.string().nullable().optional(),
     link: z.string().nullable().optional(),
-  });
+  }).passthrough();
 
   const DomainStatusSchema = z.object({
     domain: z.string(),
@@ -76,7 +76,7 @@ function validateCheckResponse(data: unknown): CheckResponse {
     source: z.string().optional(),
     detail: z.string().nullable().optional(),
     prices: z.array(PriceOptionSchema).optional(),
-  });
+  }).passthrough();
 
   const schema = z.object({
     results: z.array(DomainStatusSchema),

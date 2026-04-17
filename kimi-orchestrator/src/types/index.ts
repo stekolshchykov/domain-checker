@@ -46,7 +46,7 @@ export const PriceOptionSchema = z.object({
   price: z.string().nullable().optional(),
   currency: z.string().nullable().optional(),
   link: z.string().nullable().optional(),
-});
+}).passthrough();
 
 export type PriceOption = z.infer<typeof PriceOptionSchema>;
 
@@ -58,7 +58,7 @@ export const DomainStatusSchema = z.object({
   source: z.string().optional(),
   detail: z.string().nullable().optional(),
   prices: z.array(PriceOptionSchema).optional(),
-});
+}).passthrough();
 
 export type DomainStatus = z.infer<typeof DomainStatusSchema>;
 

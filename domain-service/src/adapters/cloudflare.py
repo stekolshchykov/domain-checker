@@ -1,98 +1,124 @@
+from __future__ import annotations
+
+import json
 from typing import Optional
 
-import httpx
-
-from src.models import DomainCheckResult, PriceOption
 from src.adapters.base import RegistrarAdapter
+from src.availability_parser import KeywordRules, ParserResult, parse_with_keyword_rules
+from src.models import FinalStatus, ProviderResult
+from src.request_runner import ProviderRuntimeConfig
+
+
+_CLOUDFLARE_RULES = KeywordRules(
+    available=("available", "can be registered"),
+    unavailable=("unavailable", "already registered", "taken"),
+    blocked=("log in", "sign in", "dash.cloudflare.com/login", "access denied", "captcha"),
+)
 
 
 class CloudflareAdapter(RegistrarAdapter):
     name = "cloudflare"
+    display_name = "Cloudflare Registrar"
+    runtime = ProviderRuntimeConfig(
+        max_concurrency=2,
+        min_interval_seconds=0.2,
+        timeout_seconds=8.0,
+        retries=2,
+        cache_ttl_seconds=20.0,
+    )
 
-    def __init__(self):
-        self._client = httpx.AsyncClient(
-            timeout=8.0,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Language": "en-US,en;q=0.9",
-            },
-            follow_redirects=True,
-        )
+    def build_source_url(self, domain: str) -> Optional[str]:
+        return f"https://dash.cloudflare.com/domains/register?domain={domain}"
 
-    async def check_domain(self, domain: str) -> DomainCheckResult:
-        link = self._build_link(domain)
+    async def check_domain(self, domain: str) -> ProviderResult:
+        source_url = self.build_source_url(domain)
+        api_url = f"https://api.cloudflare.com/client/v4/zones/name/available/{domain}"
+
         try:
-            # Cloudflare's public domains page sometimes exposes availability via an internal API
-            # Try the zone available endpoint (often requires auth, but worth a shot for some TLDs)
-            api_url = f"https://api.cloudflare.com/client/v4/zones/name/available/{domain}"
-            resp = await self._client.get(api_url)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("success") and "result" in data:
-                    result = data["result"]
-                    available = result.get("available")
-                    price = result.get("price")
-                    currency = "USD"
-                    price_str = None
-                    if isinstance(price, (int, float)):
-                        price_str = f"${price:.2f}"
-
-                    if available is True:
-                        return DomainCheckResult(
-                            domain=domain,
-                            status="available",
-                            price=price_str,
-                            currency=currency,
-                            source="cloudflare_api",
-                            prices=[PriceOption(source="cloudflare", price=price_str, currency=currency, link=link)],
-                        )
-                    elif available is False:
-                        return DomainCheckResult(
-                            domain=domain,
-                            status="taken",
-                            source="cloudflare_api",
-                            prices=[PriceOption(source="cloudflare", price=price_str, currency=currency, link=link)],
-                        )
-
-            # Fallback: try the public search page for any JSON hints
-            search_url = f"https://domains.cloudflare.com/?domain={domain}"
-            search_resp = await self._client.get(search_url)
-            text = search_resp.text.lower()
-            if '"available":true' in text or '"isavailable":true' in text:
-                return DomainCheckResult(
+            api_result = await self.runner.request(
+                self.name,
+                "GET",
+                api_url,
+                timeout_seconds=self.runtime.timeout_seconds,
+                retries=1,
+                cache_ttl_seconds=self.runtime.cache_ttl_seconds,
+            )
+            parser = self._parse_api_response(api_result.text)
+            if parser is not None:
+                return self._to_provider_result(
                     domain=domain,
-                    status="available",
-                    source="cloudflare_page",
-                    prices=[PriceOption(source="cloudflare", link=link)],
+                    parser=parser,
+                    request_result=api_result,
+                    source_url=source_url,
+                    fallback_used=False,
                 )
-            if '"available":false' in text or '"isavailable":false' in text:
-                return DomainCheckResult(
-                    domain=domain,
-                    status="taken",
-                    source="cloudflare_page",
-                    prices=[PriceOption(source="cloudflare", link=link)],
-                )
+        except Exception:
+            pass
 
-            return DomainCheckResult(
+        try:
+            page_result = await self.runner.request(
+                self.name,
+                "GET",
+                source_url,
+                timeout_seconds=self.runtime.timeout_seconds,
+                retries=1,
+                cache_ttl_seconds=5.0,
+            )
+            parser = parse_with_keyword_rules(page_result.text, domain, _CLOUDFLARE_RULES)
+            return self._to_provider_result(
                 domain=domain,
-                status="unknown",
-                source="cloudflare",
-                detail="Could not determine availability",
-                prices=[],
+                parser=parser,
+                request_result=page_result,
+                source_url=source_url,
+                fallback_used=True,
             )
         except Exception as exc:
-            return DomainCheckResult(
+            # Cloudflare registrar flow is account-walled for most users.
+            return self._error_result(
                 domain=domain,
-                status="unknown",
-                source="cloudflare",
+                final_status=FinalStatus.BLOCKED,
                 detail=str(exc),
-                prices=[],
+                source_url=source_url,
+                request_url=source_url,
+                fallback_used=True,
             )
 
-    def _build_link(self, domain: str) -> Optional[str]:
-        return f"https://domains.cloudflare.com/?domain={domain}"
+    def _parse_api_response(self, body: str) -> ParserResult | None:
+        try:
+            payload = json.loads(body)
+        except Exception:
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        if payload.get("success") is not True:
+            return None
+
+        result = payload.get("result") or {}
+        available = result.get("available")
+        price = result.get("price")
+
+        price_str = None
+        if isinstance(price, (int, float)):
+            price_str = f"${float(price):.2f}"
+
+        if available is True:
+            return ParserResult(
+                final_status=FinalStatus.STANDARD_PRICE if price_str else FinalStatus.AVAILABLE,
+                registration_price=price_str,
+                currency="USD" if price_str else None,
+                note="cloudflare api",
+                confidence=0.9,
+            )
+
+        if available is False:
+            return ParserResult(
+                final_status=FinalStatus.UNAVAILABLE,
+                registration_price=price_str,
+                currency="USD" if price_str else None,
+                note="cloudflare api",
+                confidence=0.9,
+            )
+
+        return None

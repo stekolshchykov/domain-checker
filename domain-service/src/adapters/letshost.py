@@ -1,111 +1,83 @@
-import re as _re
+from __future__ import annotations
+
 from typing import Optional
 
-import httpx
-
-from src.models import DomainCheckResult, PriceOption
 from src.adapters.base import RegistrarAdapter
+from src.availability_parser import KeywordRules, parse_with_keyword_rules
+from src.models import FinalStatus, ProviderResult
+from src.request_runner import ProviderRuntimeConfig
+
+
+_LETSHOST_RULES = KeywordRules(
+    available=("domain is available", "congratulations", "available to register"),
+    unavailable=("already registered", "domain is not available", "not available", "unavailable"),
+    blocked=("must login", "access denied", "captcha"),
+)
 
 
 class LetsHostAdapter(RegistrarAdapter):
     name = "letshost"
+    display_name = "LetsHost"
+    runtime = ProviderRuntimeConfig(
+        max_concurrency=2,
+        min_interval_seconds=0.25,
+        timeout_seconds=8.0,
+        retries=2,
+        cache_ttl_seconds=20.0,
+    )
 
-    def __init__(self):
-        self._client = httpx.AsyncClient(
-            timeout=8.0,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
-            follow_redirects=True,
-        )
+    def build_source_url(self, domain: str) -> Optional[str]:
+        return f"https://billing.letshost.ie/cart.php?a=add&domain=register&query={domain}"
 
-    async def check_domain(self, domain: str) -> DomainCheckResult:
-        link = self._build_link(domain)
+    async def check_domain(self, domain: str) -> ProviderResult:
+        source_url = self.build_source_url(domain)
+        endpoint = "https://billing.letshost.ie/domainchecker.php"
+        sld, tld = self._split_domain(domain)
+
+        payload = {
+            "domain": sld,
+            "tld[]": tld,
+        }
+
         try:
-            parts = domain.rsplit(".", 1)
-            if len(parts) != 2:
-                return DomainCheckResult(
-                    domain=domain,
-                    status="unknown",
-                    source="letshost",
-                    detail="Invalid domain format",
-                    prices=[],
-                )
-            sld, tld = parts
-
-            # WHMCS domain checker endpoint
-            url = "https://billing.letshost.ie/domainchecker.php"
-            data = {
-                "domain": sld,
-                f"tld[]": f".{tld}",
-            }
-            resp = await self._client.post(url, data=data)
-            text = resp.text
-            text_lower = text.lower()
-
-            # Strong taken signals first
-            taken_signals = [
-                "not available",
-                "unavailable",
-                "already registered",
-                "domain is not available",
-            ]
-            if any(s in text_lower for s in taken_signals):
-                return DomainCheckResult(
-                    domain=domain,
-                    status="taken",
-                    source="letshost",
-                    prices=[PriceOption(source="letshost", link=link)],
-                )
-
-            # Strong available signals
-            available_signals = [
-                "domain is available",
-                "congratulations",
-                "available to register",
-            ]
-            if any(s in text_lower for s in available_signals):
-                price = None
-                currency = "EUR"
-                price_match = _re.search(r'€\s*([0-9]+(?:\.[0-9]{2})?)', text)
-                if not price_match:
-                    price_match = _re.search(r'\$\s*([0-9]+(?:\.[0-9]{2})?)', text)
-                    if price_match:
-                        currency = "USD"
-                if price_match:
-                    price = f"{'€' if currency == 'EUR' else '$'}{price_match.group(1)}"
-
-                return DomainCheckResult(
-                    domain=domain,
-                    status="available",
-                    price=price,
-                    currency=currency,
-                    source="letshost",
-                    prices=[PriceOption(source="letshost", price=price, currency=currency, link=link)],
-                )
-
-            return DomainCheckResult(
+            request_result = await self.runner.request(
+                self.name,
+                "POST",
+                endpoint,
+                data=payload,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout_seconds=self.runtime.timeout_seconds,
+                retries=self.runtime.retries,
+                cache_ttl_seconds=self.runtime.cache_ttl_seconds,
+            )
+            parser = parse_with_keyword_rules(request_result.text, domain, _LETSHOST_RULES)
+            return self._to_provider_result(
                 domain=domain,
-                status="unknown",
-                source="letshost",
-                detail="Could not determine availability from response",
-                prices=[],
+                parser=parser,
+                request_result=request_result,
+                source_url=source_url,
+                fallback_used=False,
             )
         except Exception as exc:
-            return DomainCheckResult(
+            error = str(exc).lower()
+            if "rate" in error:
+                status = FinalStatus.RATE_LIMITED
+            elif "blocked" in error:
+                status = FinalStatus.BLOCKED
+            elif "temporary" in error:
+                status = FinalStatus.TEMPORARILY_UNAVAILABLE
+            else:
+                status = FinalStatus.UNKNOWN
+            return self._error_result(
                 domain=domain,
-                status="unknown",
-                source="letshost",
+                final_status=status,
                 detail=str(exc),
-                prices=[],
+                source_url=source_url,
+                request_url=endpoint,
             )
 
-    def _build_link(self, domain: str) -> Optional[str]:
-        return f"https://billing.letshost.ie/cart.php?a=add&domain=register&query={domain}"
+    def _split_domain(self, domain: str) -> tuple[str, str]:
+        if "." not in domain:
+            return domain, ""
+        sld, tld = domain.rsplit(".", 1)
+        return sld, f".{tld}"

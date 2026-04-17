@@ -1,202 +1,139 @@
-import asyncio
-import time
+from __future__ import annotations
+
+import json
 from typing import Optional
 
-import httpx
-from playwright.async_api import Page, Browser
-
-from src.config import settings
-from src.models import DomainCheckResult, PriceOption
 from src.adapters.base import RegistrarAdapter
+from src.availability_parser import KeywordRules, ParserResult, parse_with_keyword_rules
+from src.models import FinalStatus, ProviderResult
+from src.request_runner import ProviderRuntimeConfig
+
+
+_NAMECHEAP_RULES = KeywordRules(
+    available=("is available", "add to cart", "buy now", "available to register"),
+    unavailable=("is taken", "registered", "already registered", "domain is unavailable"),
+    premium=("premium", "make offer", "aftermarket"),
+    promo=("first year", "special offer", "save"),
+)
 
 
 class NamecheapAdapter(RegistrarAdapter):
     name = "namecheap"
+    display_name = "Namecheap"
+    runtime = ProviderRuntimeConfig(
+        max_concurrency=3,
+        min_interval_seconds=0.1,
+        timeout_seconds=10.0,
+        retries=2,
+        cache_ttl_seconds=20.0,
+    )
 
-    def __init__(self):
-        self._playwright = None
-        self._browser: Optional[Browser] = None
-        self._page: Optional[Page] = None
-        self._semaphore = asyncio.Semaphore(3)
-        self._last_request_at = 0.0
-        self._client = httpx.AsyncClient(timeout=10.0)
-
-    async def start(self) -> None:
-        from playwright.async_api import async_playwright
-
-        self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.firefox.launch(
-            headless=settings.playwright_headless,
-        )
-        self._last_request_at = 0.0
-
-    async def stop(self) -> None:
-        await self._client.aclose()
-        if self._page:
-            await self._page.close()
-            self._page = None
-        if self._browser:
-            await self._browser.close()
-            self._browser = None
-        if self._playwright:
-            await self._playwright.stop()
-            self._playwright = None
-
-    async def _ensure_page(self) -> Page:
-        if self._page is None or self._page.is_closed():
-            context = await self._browser.new_context(
-                viewport={"width": 1920, "height": 1080},
-                locale="en-US",
-                timezone_id="America/New_York",
-            )
-            self._page = await context.new_page()
-        return self._page
-
-    async def _throttle(self) -> None:
-        elapsed = time.monotonic() - self._last_request_at
-        delay = settings.rate_limit_seconds - elapsed
-        if delay > 0:
-            await asyncio.sleep(delay)
-        self._last_request_at = time.monotonic()
-
-    async def check_domain(self, domain: str) -> DomainCheckResult:
-        async with self._semaphore:
-            page = await self._ensure_page()
-            await self._throttle()
-            return await self._check_single(page, domain.strip().lower())
-
-    def _build_link(self, domain: str) -> Optional[str]:
+    def build_source_url(self, domain: str) -> Optional[str]:
         return f"https://www.namecheap.com/domains/registration/results/?domain={domain}"
 
-    async def _check_single(self, page: Page, domain: str) -> DomainCheckResult:
-        url = f"https://www.namecheap.com/domains/registration/results/?domain={domain}"
-        link = self._build_link(domain)
+    async def check_domain(self, domain: str) -> ProviderResult:
+        source_url = self.build_source_url(domain)
+        parser_error: Optional[str] = None
+
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=settings.page_timeout_ms)
-
-            # Wait for the domain heading to appear (core content)
-            try:
-                await page.locator('article h2').filter(has_text=domain).first.wait_for(timeout=5000)
-            except Exception:
-                pass
-
-            # Try to close cookie dialog if present
-            try:
-                close_btn = page.locator('button:has-text("Close")').first
-                if await close_btn.is_visible(timeout=500):
-                    await close_btn.click()
-            except Exception:
-                pass
-
-            return await self._parse_page(page, domain, link)
+            page_result = await self.runner.request(
+                self.name,
+                "GET",
+                source_url,
+                timeout_seconds=self.runtime.timeout_seconds,
+                retries=self.runtime.retries,
+                cache_ttl_seconds=self.runtime.cache_ttl_seconds,
+            )
+            parser = parse_with_keyword_rules(page_result.text, domain, _NAMECHEAP_RULES)
+            if parser.final_status not in (FinalStatus.PARSING_FAILED, FinalStatus.UNKNOWN):
+                return self._to_provider_result(
+                    domain=domain,
+                    parser=parser,
+                    request_result=page_result,
+                    source_url=source_url,
+                    fallback_used=False,
+                )
+            parser_error = parser.note
         except Exception as exc:
-            fallback = await self._aftermarket_fallback(domain, link)
-            if fallback:
-                return fallback
-            return DomainCheckResult(
-                domain=domain,
-                status="unknown",
-                source="unknown",
-                detail=str(exc),
-                prices=[],
-            )
+            parser_error = str(exc)
 
-    async def _parse_page(self, page: Page, domain: str, link: str) -> DomainCheckResult:
-        heading_locator = page.locator('article h2').filter(has_text=domain).first
+        fallback = await self._aftermarket_fallback(domain, source_url)
+        if fallback is not None:
+            return fallback
 
-        if await heading_locator.count() == 0:
-            fallback = await self._aftermarket_fallback(domain, link)
-            if fallback:
-                return fallback
-            return DomainCheckResult(
-                domain=domain,
-                status="unknown",
-                source="unknown",
-                detail="Domain card not found on page",
-                prices=[],
-            )
-
-        article = heading_locator.locator("xpath=../../..")
-        article_text = (await article.inner_text()).lower()
-        article_words = set(article_text.split())
-        buttons = await article.locator("button").all_inner_texts()
-        buttons_lower = [b.lower() for b in buttons]
-
-        is_premium = "premium" in article_words
-        is_taken = (
-            "taken" in article_words
-            or "registered" in article_words
-            or "make offer" in buttons_lower
-        )
-
-        price = None
-        currency = None
-        strong_texts = await article.locator("strong").all_inner_texts()
-        for text in strong_texts:
-            text = text.strip()
-            if any(sym in text for sym in ["€", "$", "£"]):
-                price = text
-                if "€" in text:
-                    currency = "EUR"
-                elif "$" in text:
-                    currency = "USD"
-                elif "£" in text:
-                    currency = "GBP"
-                break
-
-        if is_taken:
-            return DomainCheckResult(
-                domain=domain,
-                status="taken",
-                source="namecheap_page",
-                prices=[PriceOption(source="namecheap", price=price, currency=currency, link=link)],
-            )
-
-        status = "premium" if is_premium else "available"
-        return DomainCheckResult(
+        return self._error_result(
             domain=domain,
-            status=status,
-            price=price,
-            currency=currency,
-            source="namecheap_page",
-            prices=[PriceOption(source="namecheap", price=price, currency=currency, link=link)],
+            final_status=FinalStatus.PARSING_FAILED,
+            detail=parser_error or "Namecheap parser failed",
+            source_url=source_url,
+            request_url=source_url,
+            fallback_used=True,
         )
 
-    async def _aftermarket_fallback(self, domain: str, link: str) -> Optional[DomainCheckResult]:
+    async def _aftermarket_fallback(self, domain: str, source_url: str) -> ProviderResult | None:
+        api_url = f"https://aftermarket.namecheapapi.com/domain/status?domain={domain}"
         try:
-            url = f"https://aftermarket.namecheapapi.com/domain/status?domain={domain}"
-            resp = await self._client.get(url)
-            data = resp.json()
-            if data.get("type") == "ok" and data.get("data"):
-                item = data["data"][0]
-                status = item.get("status")
-                price = None
-                currency = None
-                price_str = None
-                if item.get("price"):
-                    price_str = f"${item['price'] / 100:.2f}"
-                    price = price_str
-                    currency = "USD"
+            response = await self.runner.request(
+                self.name,
+                "GET",
+                api_url,
+                timeout_seconds=8.0,
+                retries=2,
+                cache_ttl_seconds=15.0,
+            )
+            payload = json.loads(response.text)
+            data = payload.get("data") or []
+            if payload.get("type") != "ok" or not data:
+                return None
 
-                if status == "notfound":
-                    return DomainCheckResult(
-                        domain=domain,
-                        status="available",
-                        source="aftermarket_api",
-                        prices=[PriceOption(source="namecheap", price=price, currency=currency, link=link)],
-                    )
-                elif status in ("active", "sold", "pending"):
-                    return DomainCheckResult(
-                        domain=domain,
-                        status="taken",
-                        price=price_str,
-                        currency=currency,
-                        source="aftermarket_api",
-                        prices=[PriceOption(source="namecheap", price=price, currency=currency, link=link)],
-                    )
+            item = data[0]
+            status = str(item.get("status", "")).lower()
+            cents = item.get("price")
+            price = None
+            if isinstance(cents, (int, float)):
+                price = f"${float(cents) / 100:.2f}"
+
+            if status == "notfound":
+                parser = ParserResult(
+                    final_status=FinalStatus.UNKNOWN,
+                    registration_price=price,
+                    currency="USD" if price else None,
+                    note="aftermarket fallback: no listing (not availability proof)",
+                    confidence=0.25,
+                )
+                return self._to_provider_result(
+                    domain=domain,
+                    parser=parser,
+                    request_result=response,
+                    source_url=source_url,
+                    fallback_used=True,
+                )
+
+            if status in ("active", "sold", "pending"):
+                parser = ParserResult(
+                    final_status=FinalStatus.UNAVAILABLE,
+                    registration_price=price,
+                    currency="USD" if price else None,
+                    premium=bool(price),
+                    note=f"aftermarket fallback: {status}",
+                    confidence=0.84,
+                )
+                return self._to_provider_result(
+                    domain=domain,
+                    parser=parser,
+                    request_result=response,
+                    source_url=source_url,
+                    fallback_used=True,
+                )
+            return None
         except Exception:
-            pass
+            return None
+
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
         return None
 
     def is_ready(self) -> bool:
-        return self._browser is not None and self._browser.is_connected()
+        return True

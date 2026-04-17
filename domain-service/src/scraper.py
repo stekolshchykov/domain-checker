@@ -1,205 +1,299 @@
 import asyncio
-from typing import List, Optional
+import logging
+import math
+import time
+from collections import defaultdict
+from typing import List
 
-from src.models import DomainCheckResult, PriceOption
-from src.adapters import DEFAULT_ADAPTERS
+from src.adapters import build_default_adapters
 from src.adapters.base import RegistrarAdapter
-from src.adapters.namecheap import NamecheapAdapter
+from src.config import settings
+from src.models import (
+    DomainCheckResult,
+    FinalStatus,
+    PriceOption,
+    ProviderResult,
+    final_status_to_legacy,
+)
+from src.request_runner import RequestRunner
+
+logger = logging.getLogger("domain_checker.scraper")
+
+
+_AVAILABILITY_STATUSES = {
+    FinalStatus.AVAILABLE,
+    FinalStatus.STANDARD_PRICE,
+    FinalStatus.DISCOUNTED,
+    FinalStatus.PREMIUM,
+}
+_UNAVAILABLE_STATUSES = {
+    FinalStatus.UNAVAILABLE,
+    FinalStatus.TRANSFER_ONLY,
+}
+_DECISIVE_STATUSES = _AVAILABILITY_STATUSES | _UNAVAILABLE_STATUSES | {FinalStatus.UNSUPPORTED_TLD}
+_OPERATIONAL_STATUSES = {
+    FinalStatus.BLOCKED,
+    FinalStatus.RATE_LIMITED,
+    FinalStatus.TEMPORARILY_UNAVAILABLE,
+    FinalStatus.PARSING_FAILED,
+    FinalStatus.UNKNOWN,
+}
+_STATUS_QUALITY = {
+    FinalStatus.AVAILABLE: 1.0,
+    FinalStatus.STANDARD_PRICE: 1.0,
+    FinalStatus.DISCOUNTED: 1.0,
+    FinalStatus.PREMIUM: 0.98,
+    FinalStatus.UNAVAILABLE: 1.0,
+    FinalStatus.TRANSFER_ONLY: 0.92,
+    FinalStatus.UNSUPPORTED_TLD: 0.88,
+    FinalStatus.BLOCKED: 0.3,
+    FinalStatus.RATE_LIMITED: 0.3,
+    FinalStatus.TEMPORARILY_UNAVAILABLE: 0.28,
+    FinalStatus.PARSING_FAILED: 0.2,
+    FinalStatus.UNKNOWN: 0.25,
+}
 
 
 class MultiRegistrarChecker:
-    """Checks domain availability across multiple registrars in parallel."""
+    """Parallel, fault-tolerant domain checker across many registrars."""
 
-    def __init__(self, max_concurrent_domains: int = 4):
-        self._adapters: List[RegistrarAdapter] = []
-        self._namecheap: Optional[NamecheapAdapter] = None
-        for adapter_cls in DEFAULT_ADAPTERS:
-            adapter = adapter_cls()
-            self._adapters.append(adapter)
-            if isinstance(adapter, NamecheapAdapter):
-                self._namecheap = adapter
-        self._domain_semaphore = asyncio.Semaphore(max_concurrent_domains)
+    def __init__(self, max_concurrent_domains: int | None = None):
+        self._domain_semaphore = asyncio.Semaphore(
+            max(1, max_concurrent_domains or settings.max_concurrent_domains)
+        )
+        self._runner = RequestRunner(
+            global_max_concurrency=settings.max_concurrent_requests,
+            default_timeout_seconds=settings.request_timeout_seconds,
+            default_retries=settings.request_retry_attempts,
+            default_cache_ttl_seconds=settings.request_cache_ttl_seconds,
+            backoff_base_seconds=settings.request_retry_base_seconds,
+            backoff_jitter_seconds=settings.request_retry_jitter_seconds,
+            circuit_breaker_failure_threshold=settings.circuit_breaker_failure_threshold,
+            circuit_breaker_open_seconds=settings.circuit_breaker_open_seconds,
+        )
+        self._adapters: List[RegistrarAdapter] = build_default_adapters(self._runner)
+        self._provider_reliability_alpha = min(1.0, max(0.01, settings.provider_reliability_alpha))
+        self._provider_reliability_floor = min(1.0, max(0.05, settings.provider_reliability_floor))
+        self._provider_reliability: dict[str, float] = {adapter.name: 1.0 for adapter in self._adapters}
+        self._provider_reliability_lock = asyncio.Lock()
 
     async def start(self) -> None:
-        if self._namecheap:
-            await self._namecheap.start()
+        for adapter in self._adapters:
+            start = getattr(adapter, "start", None)
+            if callable(start):
+                maybe_awaitable = start()
+                if asyncio.iscoroutine(maybe_awaitable):
+                    await maybe_awaitable
 
     async def stop(self) -> None:
-        if self._namecheap:
-            await self._namecheap.stop()
-        # HTTP-based adapters may also hold clients; close them gracefully
         for adapter in self._adapters:
-            if hasattr(adapter, "_client") and hasattr(adapter._client, "aclose"):
-                try:
-                    await adapter._client.aclose()
-                except Exception:
-                    pass
+            stop = getattr(adapter, "stop", None)
+            if callable(stop):
+                maybe_awaitable = stop()
+                if asyncio.iscoroutine(maybe_awaitable):
+                    await maybe_awaitable
+        await self._runner.close()
 
     async def check_domains(self, domains: List[str]) -> List[DomainCheckResult]:
-        tasks = [
-            self._check_domain_with_limit(d.strip().lower())
-            for d in domains
-        ]
-        results = await asyncio.gather(*tasks)
-        return list(results)
+        tasks = [self._check_domain_with_limit(d.strip().lower()) for d in domains]
+        return list(await asyncio.gather(*tasks))
 
     async def _check_domain_with_limit(self, domain: str) -> DomainCheckResult:
         async with self._domain_semaphore:
             return await self._check_domain_parallel(domain)
 
     async def _check_domain_parallel(self, domain: str) -> DomainCheckResult:
-        """Run all adapters concurrently and aggregate their results."""
-        tasks = [self._run_adapter(adapter, domain) for adapter in self._adapters]
-        adapter_results = await asyncio.gather(*tasks, return_exceptions=True)
+        provider_tasks = [self._run_adapter(adapter, domain) for adapter in self._adapters]
+        provider_results = list(await asyncio.gather(*provider_tasks))
+        return self._aggregate(domain, provider_results)
 
-        successes: List[DomainCheckResult] = []
-        details: List[str] = []
-
-        for res in adapter_results:
-            if isinstance(res, Exception):
-                details.append(str(res))
-                continue
-            successes.append(res)
-
-        return self._aggregate_results(domain, successes, details)
-
-    async def _run_adapter(self, adapter: RegistrarAdapter, domain: str) -> DomainCheckResult:
-        """Wrap adapter call so exceptions become results rather than breaking gather."""
+    async def _run_adapter(self, adapter: RegistrarAdapter, domain: str) -> ProviderResult:
+        started = time.monotonic()
+        logger.info("registrar_started registrar=%s domain=%s", adapter.name, domain)
         try:
-            return await adapter.check_domain(domain)
+            result = await adapter.check_domain(domain)
+            reliability = await self._record_provider_outcome(adapter.name, result.final_status)
+            if result.debug is not None:
+                result.debug.provider_reliability = round(reliability, 3)
+            logger.info(
+                "registrar_completed registrar=%s domain=%s status=%s final_status=%s duration_ms=%d provider_reliability=%.3f",
+                adapter.name,
+                domain,
+                result.status,
+                result.final_status.value,
+                int((time.monotonic() - started) * 1000),
+                reliability,
+            )
+            return result
         except Exception as exc:
-            return DomainCheckResult(
+            reliability = await self._record_provider_outcome(adapter.name, FinalStatus.UNKNOWN)
+            logger.warning(
+                "registrar_failed registrar=%s domain=%s error=%s duration_ms=%d provider_reliability=%.3f",
+                adapter.name,
+                domain,
+                str(exc),
+                int((time.monotonic() - started) * 1000),
+                reliability,
+            )
+            error_result = adapter._error_result(
                 domain=domain,
-                status="unknown",
-                source=adapter.name,
+                final_status=FinalStatus.UNKNOWN,
                 detail=str(exc),
-                prices=[],
+                source_url=adapter.build_source_url(domain),
+                request_url=adapter.build_source_url(domain),
             )
+            if error_result.debug is not None:
+                error_result.debug.provider_reliability = round(reliability, 3)
+            return error_result
 
-    def _aggregate_results(
-        self,
-        domain: str,
-        successes: List[DomainCheckResult],
-        details: List[str],
-    ) -> DomainCheckResult:
-        """Aggregate multiple registrar results into one DomainCheckResult."""
-        if not successes:
-            return DomainCheckResult(
-                domain=domain,
-                status="unknown",
-                source="unknown",
-                detail="; ".join(details) if details else "All registrars failed",
-                prices=[],
-            )
+    def _aggregate(self, domain: str, provider_results: List[ProviderResult]) -> DomainCheckResult:
+        weighted_scores: dict[FinalStatus, float] = defaultdict(float)
+        for result in provider_results:
+            confidence = result.confidence if result.confidence is not None else 0.3
+            provider_weight = self._provider_weight(result.registrar)
+            weighted_scores[result.final_status] += max(0.05, confidence) * provider_weight
 
-        # Collect all price options from successful checks
-        prices: List[PriceOption] = []
-        for res in successes:
-            for po in res.prices:
-                if po.price or po.link:
-                    prices.append(po)
-            # Also wrap legacy single-price results if prices list is empty
-            if not res.prices and (res.price or res.source != "unknown"):
-                link = None
-                if hasattr(res, "prices") and len(res.prices) == 0:
-                    # Try to infer link from source name
-                    link = self._infer_link(res.source, domain)
-                prices.append(
-                    PriceOption(
-                        source=self._source_display_name(res.source),
-                        price=res.price,
-                        currency=res.currency,
-                        link=link,
-                    )
-                )
+        availability_score = sum(weighted_scores[s] for s in _AVAILABILITY_STATUSES)
+        unavailable_score = sum(weighted_scores[s] for s in _UNAVAILABLE_STATUSES)
+        total_weight = sum(weighted_scores.values())
+        operational_weight = sum(weighted_scores[s] for s in _OPERATIONAL_STATUSES)
 
-        # Deduplicate prices by source
-        seen = set()
-        unique_prices = []
-        for po in prices:
-            key = (po.source, po.price)
-            if key in seen:
-                continue
-            seen.add(key)
-            unique_prices.append(po)
-
-        # Determine overall status by priority
-        # Namecheap is the most reliable source, so use its status if available.
-        # Fallback to general consensus if Namecheap is not in successes.
-        namecheap_result = next(
-            (r for r in successes if r.source.startswith("namecheap")), None
-        )
-        if namecheap_result and namecheap_result.status != "unknown":
-            overall_status = namecheap_result.status
-        else:
-            statuses = [r.status for r in successes]
-            if "taken" in statuses:
-                overall_status = "taken"
-            elif "premium" in statuses:
-                overall_status = "premium"
-            elif "available" in statuses:
-                overall_status = "available"
+        if availability_score > 0 and unavailable_score > 0:
+            delta_ratio = abs(availability_score - unavailable_score) / max(availability_score, unavailable_score)
+            if delta_ratio < 0.35:
+                final_status = FinalStatus.UNKNOWN
+                note = "ambiguous provider consensus"
             else:
-                overall_status = "unknown"
+                final_status = (
+                    max(_AVAILABILITY_STATUSES, key=lambda s: weighted_scores[s])
+                    if availability_score > unavailable_score
+                    else max(_UNAVAILABLE_STATUSES, key=lambda s: weighted_scores[s])
+                )
+                note = None
+        elif availability_score > 0:
+            final_status = max(_AVAILABILITY_STATUSES, key=lambda s: weighted_scores[s])
+            note = None
+        elif unavailable_score > 0:
+            final_status = max(_UNAVAILABLE_STATUSES, key=lambda s: weighted_scores[s])
+            note = None
+        else:
+            final_status, note = self._operational_consensus(weighted_scores)
 
-        # Pick best representative price for backward compatibility
-        # Prefer available with price, then any with price
-        best = None
-        for res in successes:
-            if res.status == overall_status and res.price:
-                best = res
-                break
-        if best is None:
-            for res in successes:
-                if res.price:
-                    best = res
-                    break
-        if best is None:
-            best = successes[0]
+        if total_weight > 0 and final_status in _DECISIVE_STATUSES:
+            decisive_support_ratio = weighted_scores.get(final_status, 0.0) / total_weight
+            if decisive_support_ratio < 0.28 and operational_weight >= weighted_scores.get(final_status, 0.0):
+                top_operational, op_note = self._operational_consensus(weighted_scores)
+                final_status = top_operational
+                weak_note = "decisive signal too weak"
+                if op_note:
+                    note = f"{weak_note}; {op_note}"
+                else:
+                    note = weak_note
 
-        detail_parts = []
-        for r in successes:
-            if r.detail and r.detail != "Could not determine availability":
-                detail_parts.append(r.detail)
-        for d in details:
-            if d and d != "Could not determine availability":
-                detail_parts.append(d)
+        best_price = self._pick_best_price(provider_results, final_status)
+        registration_price = best_price.price if best_price else None
+        renewal_price = best_price.renewal_price if best_price else None
+        currency = best_price.currency if best_price else None
+        source_url = best_price.link if best_price else None
+
+        premium = any(r.premium for r in provider_results)
+        promo = any(r.promo for r in provider_results)
+
+        detail_messages: list[str] = []
+        for item in provider_results:
+            if item.detail and item.detail not in detail_messages:
+                detail_messages.append(f"{item.registrar}: {item.detail}")
+
+        confidence_total = sum(weighted_scores.values())
+        confidence = None
+        if confidence_total > 0:
+            confidence = round(weighted_scores.get(final_status, 0.0) / confidence_total, 3)
+
+        status = final_status_to_legacy(final_status, premium)
+        prices = self._dedupe_prices(provider_results)
 
         return DomainCheckResult(
             domain=domain,
-            status=overall_status,
-            price=best.price,
-            currency=best.currency,
+            status=status,
+            final_status=final_status,
+            registrar="aggregated",
+            price=registration_price,
+            registration_price=registration_price,
+            renewal_price=renewal_price,
+            currency=currency,
+            premium=premium,
+            promo=promo,
             source="aggregated",
-            detail="; ".join(detail_parts) if detail_parts else None,
-            prices=unique_prices,
+            source_url=source_url,
+            detail="; ".join(detail_messages) if detail_messages else None,
+            note=note,
+            confidence=confidence,
+            prices=prices,
+            provider_results=provider_results,
         )
 
-    def _source_display_name(self, source: str) -> str:
-        mapping = {
-            "namecheap_page": "namecheap",
-            "namecheap_api": "namecheap",
-            "aftermarket_api": "namecheap",
-            "godaddy_api": "godaddy",
-            "godaddy_page": "godaddy",
-            "letshost": "letshost",
-            "cloudflare_api": "cloudflare",
-            "cloudflare_page": "cloudflare",
-        }
-        return mapping.get(source, source)
+    def _pick_best_price(
+        self,
+        provider_results: List[ProviderResult],
+        final_status: FinalStatus,
+    ) -> PriceOption | None:
+        price_options = self._dedupe_prices(provider_results)
+        if not price_options:
+            return None
 
-    def _infer_link(self, source: str, domain: str) -> Optional[str]:
-        if "namecheap" in source:
-            return f"https://www.namecheap.com/domains/registration/results/?domain={domain}"
-        if "godaddy" in source:
-            return f"https://www.godaddy.com/en/domainsearch/find?domainToCheck={domain}"
-        if "letshost" in source:
-            return f"https://billing.letshost.ie/cart.php?a=add&domain=register&query={domain}"
-        if "cloudflare" in source:
-            return f"https://domains.cloudflare.com/?domain={domain}"
-        return None
+        if final_status in _AVAILABILITY_STATUSES:
+            available_options = [p for p in price_options if p.status in _AVAILABILITY_STATUSES]
+            if available_options:
+                return min(available_options, key=self._price_sort_key)
+
+        return min(price_options, key=self._price_sort_key)
+
+    def _dedupe_prices(self, provider_results: List[ProviderResult]) -> List[PriceOption]:
+        seen = set()
+        merged: list[PriceOption] = []
+        for item in provider_results:
+            for po in item.prices:
+                key = (po.source, po.price, po.renewal_price, po.link)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(po)
+        return merged
+
+    def _price_sort_key(self, option: PriceOption) -> tuple[int, float]:
+        if not option.price:
+            return (1, math.inf)
+        numeric = "".join(ch for ch in option.price if ch.isdigit() or ch == ".")
+        try:
+            return (0, float(numeric))
+        except Exception:
+            return (0, math.inf)
+
+    def _operational_consensus(self, weighted_scores: dict[FinalStatus, float]) -> tuple[FinalStatus, str | None]:
+        top_operational = max(_OPERATIONAL_STATUSES, key=lambda s: weighted_scores.get(s, 0.0))
+        top_score = weighted_scores.get(top_operational, 0.0)
+        operational_total = sum(weighted_scores[s] for s in _OPERATIONAL_STATUSES)
+        if top_score <= 0 or operational_total <= 0:
+            return FinalStatus.UNKNOWN, None
+
+        dominance = top_score / operational_total
+        if dominance >= 0.8:
+            return top_operational, "operational consensus"
+
+        return FinalStatus.UNKNOWN, "operational signals mixed"
+
+    async def _record_provider_outcome(self, provider: str, status: FinalStatus) -> float:
+        sample = _STATUS_QUALITY.get(status, 0.25)
+        async with self._provider_reliability_lock:
+            previous = self._provider_reliability.get(provider, 1.0)
+            updated = previous * (1.0 - self._provider_reliability_alpha) + sample * self._provider_reliability_alpha
+            updated = min(1.0, max(self._provider_reliability_floor, updated))
+            self._provider_reliability[provider] = updated
+            return updated
+
+    def _provider_weight(self, provider: str) -> float:
+        reliability = self._provider_reliability.get(provider, 1.0)
+        return min(1.0, max(self._provider_reliability_floor, reliability))
 
     def is_ready(self) -> bool:
-        if self._namecheap:
-            return self._namecheap.is_ready()
         return True

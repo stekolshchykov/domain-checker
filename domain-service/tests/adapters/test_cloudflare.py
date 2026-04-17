@@ -1,111 +1,74 @@
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock
 
 from src.adapters.cloudflare import CloudflareAdapter
+from src.models import FinalStatus
+from src.request_runner import RequestResult
 
 
-@pytest.fixture
-def adapter():
-    return CloudflareAdapter()
+class DummyRunner:
+    def __init__(self):
+        self.request = AsyncMock()
+
+    def register_provider(self, provider, config=None):
+        return None
 
 
-# --- API success paths ---
-
-@pytest.mark.asyncio
-async def test_cloudflare_api_available_with_price(adapter):
-    adapter._client.get = AsyncMock(return_value=MagicMock(
-        status_code=200,
-        json=lambda: {
-            "success": True,
-            "result": {"available": True, "price": 9.15},
-        },
-    ))
-    result = await adapter.check_domain("example.com")
-    assert result.domain == "example.com"
-    assert result.status == "available"
-    assert result.price == "$9.15"
-    assert result.currency == "USD"
-    assert result.source == "cloudflare_api"
-    assert len(result.prices) == 1
-    assert result.prices[0].source == "cloudflare"
-    assert result.prices[0].link is not None
-
-
-@pytest.mark.asyncio
-async def test_cloudflare_api_taken(adapter):
-    adapter._client.get = AsyncMock(return_value=MagicMock(
-        status_code=200,
-        json=lambda: {
-            "success": True,
-            "result": {"available": False},
-        },
-    ))
-    result = await adapter.check_domain("example.com")
-    assert result.status == "taken"
-    assert result.source == "cloudflare_api"
-    assert result.prices[0].source == "cloudflare"
+def _result(url: str, text: str, status: int = 200) -> RequestResult:
+    now = datetime.now(timezone.utc)
+    return RequestResult(
+        provider="cloudflare",
+        url=url,
+        status_code=status,
+        text=text,
+        started_at=now,
+        completed_at=now,
+        duration_ms=33,
+        attempts=1,
+        cache_hit=False,
+    )
 
 
 @pytest.mark.asyncio
-async def test_cloudflare_api_200_no_result(adapter):
-    adapter._client.get = AsyncMock(return_value=MagicMock(
-        status_code=200,
-        json=lambda: {"success": True},
-    ))
-    # Falls through to HTML fallback, which also yields nothing
-    html_resp = MagicMock(text='<html></html>')
-    adapter._client.get = AsyncMock(side_effect=[
-        MagicMock(status_code=200, json=lambda: {"success": True}),
-        html_resp,
-    ])
-    result = await adapter.check_domain("example.com")
-    assert result.status == "unknown"
+async def test_cloudflare_api_available_with_price():
+    runner = DummyRunner()
+    runner.request.return_value = _result(
+        "https://api.cloudflare.com/client/v4/zones/name/available/example.com",
+        '{"success":true,"result":{"available":true,"price":9.15}}',
+    )
+    adapter = CloudflareAdapter(runner)
 
-
-# --- Fallback HTML paths ---
-
-@pytest.mark.asyncio
-async def test_cloudflare_html_available(adapter):
-    adapter._client.get = AsyncMock(side_effect=[
-        MagicMock(status_code=403, text="Forbidden"),
-        MagicMock(text='<script>"available":true</script>'),
-    ])
     result = await adapter.check_domain("example.com")
     assert result.status == "available"
-    assert result.source == "cloudflare_page"
+    assert result.final_status == FinalStatus.STANDARD_PRICE
+    assert result.registration_price == "$9.15"
 
 
 @pytest.mark.asyncio
-async def test_cloudflare_html_taken(adapter):
-    adapter._client.get = AsyncMock(side_effect=[
-        MagicMock(status_code=500, text="Error"),
-        MagicMock(text='<script>"isavailable":false</script>'),
-    ])
+async def test_cloudflare_page_login_is_blocked():
+    runner = DummyRunner()
+    runner.request.side_effect = [
+        _result("https://api.cloudflare.com/client/v4/zones/name/available/example.com", '{"success":false}'),
+        _result("https://dash.cloudflare.com/domains/register?domain=example.com", "Sign in to continue"),
+    ]
+    adapter = CloudflareAdapter(runner)
+
     result = await adapter.check_domain("example.com")
+    assert result.final_status == FinalStatus.BLOCKED
+    assert result.status == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_unavailable():
+    runner = DummyRunner()
+    runner.request.return_value = _result(
+        "https://api.cloudflare.com/client/v4/zones/name/available/example.com",
+        '{"success":true,"result":{"available":false}}',
+    )
+    adapter = CloudflareAdapter(runner)
+
+    result = await adapter.check_domain("example.com")
+    assert result.final_status == FinalStatus.UNAVAILABLE
     assert result.status == "taken"
-    assert result.source == "cloudflare_page"
-
-
-@pytest.mark.asyncio
-async def test_cloudflare_html_no_signals_returns_unknown(adapter):
-    adapter._client.get = AsyncMock(side_effect=[
-        MagicMock(status_code=503, text="Service Unavailable"),
-        MagicMock(text='<html><body>Cloudflare Registrar</body></html>'),
-    ])
-    result = await adapter.check_domain("example.com")
-    assert result.status == "unknown"
-    assert result.source == "cloudflare"
-    assert result.detail == "Could not determine availability"
-    assert result.prices == []
-
-
-# --- Edge cases ---
-
-@pytest.mark.asyncio
-async def test_cloudflare_exception_returns_unknown(adapter):
-    adapter._client.get = AsyncMock(side_effect=Exception("SSL handshake failed"))
-    result = await adapter.check_domain("example.com")
-    assert result.status == "unknown"
-    assert "SSL handshake failed" in result.detail
-    assert result.source == "cloudflare"
-    assert result.prices == []

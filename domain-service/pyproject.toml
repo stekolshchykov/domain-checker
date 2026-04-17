@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "domain-checker"
 version = "0.1.0"
-description = "Domain availability checker via Namecheap"
+description = "Parallel multi-registrar domain availability and pricing checker"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115.0",

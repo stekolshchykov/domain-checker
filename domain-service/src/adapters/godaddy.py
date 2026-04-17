@@ -1,116 +1,140 @@
-import asyncio
+from __future__ import annotations
+
 import json
 from typing import Optional
 
-import httpx
-
-from src.models import DomainCheckResult, PriceOption
 from src.adapters.base import RegistrarAdapter
+from src.availability_parser import KeywordRules, ParserResult, parse_with_keyword_rules
+from src.models import FinalStatus, ProviderResult
+from src.request_runner import ProviderRuntimeConfig
+
+
+_GODADDY_RULES = KeywordRules(
+    available=("is available", "available now", "add to cart", "buy it now"),
+    unavailable=("is taken", "already taken", "not available", "registered"),
+    premium=("premium domain", "broker service", "make offer"),
+    promo=("save", "first year", "discount"),
+)
 
 
 class GoDaddyAdapter(RegistrarAdapter):
     name = "godaddy"
+    display_name = "GoDaddy"
+    runtime = ProviderRuntimeConfig(
+        max_concurrency=3,
+        min_interval_seconds=0.12,
+        timeout_seconds=8.0,
+        retries=2,
+        cache_ttl_seconds=20.0,
+    )
 
-    def __init__(self):
-        self._client = httpx.AsyncClient(
-            timeout=8.0,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Language": "en-US,en;q=0.9",
-            },
-            follow_redirects=True,
-        )
+    def build_source_url(self, domain: str) -> Optional[str]:
+        return f"https://www.godaddy.com/domainsearch/find?domainToCheck={domain}"
 
-    async def check_domain(self, domain: str) -> DomainCheckResult:
-        link = self._build_link(domain)
+    async def check_domain(self, domain: str) -> ProviderResult:
+        source_url = self.build_source_url(domain)
+        sld, tld = self._split_domain(domain)
+        api_url = f"https://www.godaddy.com/domainfind/v1/search/exact?q={sld}&tld={tld}"
+
         try:
-            parts = domain.rsplit(".", 1)
-            if len(parts) != 2:
-                return DomainCheckResult(
-                    domain=domain,
-                    status="unknown",
-                    source="godaddy",
-                    detail="Invalid domain format",
-                    prices=[],
-                )
-            sld, tld = parts
-            api_url = f"https://www.godaddy.com/domainfind/v1/search/exact?q={sld}&tld={tld}"
-            fallback_url = (
-                f"https://www.godaddy.com/en/domainsearch/find"
-                f"?checkAvail=1&domainToCheck={domain}"
+            api_result = await self.runner.request(
+                self.name,
+                "GET",
+                api_url,
+                timeout_seconds=self.runtime.timeout_seconds,
+                retries=self.runtime.retries,
+                cache_ttl_seconds=self.runtime.cache_ttl_seconds,
             )
-
-            # Run API and fallback requests in parallel for speed
-            api_task = self._client.get(api_url)
-            fallback_task = self._client.get(fallback_url)
-            api_resp, fallback_resp = await asyncio.gather(api_task, fallback_task)
-
-            if api_resp.status_code == 200:
-                data = api_resp.json()
-                exact = data.get("ExactMatchDomain") or {}
-                is_available = exact.get("IsAvailable")
-                price_info = exact.get("Price") or exact.get("PriceInfo")
-                price = None
-                currency = "USD"
-                if isinstance(price_info, (int, float)):
-                    price = f"${price_info:.2f}"
-                elif isinstance(price_info, dict):
-                    price = price_info.get("ListPriceDisplay")
-                    currency = price_info.get("Currency", "USD")
-
-                if is_available is True:
-                    return DomainCheckResult(
-                        domain=domain,
-                        status="available",
-                        price=price,
-                        currency=currency,
-                        source="godaddy_api",
-                        prices=[PriceOption(source="godaddy", price=price, currency=currency, link=link)],
-                    )
-                elif is_available is False:
-                    return DomainCheckResult(
-                        domain=domain,
-                        status="taken",
-                        source="godaddy_api",
-                        prices=[PriceOption(source="godaddy", price=price, currency=currency, link=link)],
-                    )
-
-            text = fallback_resp.text.lower()
-            if '"isavailable":true' in text or '"available":true' in text:
-                return DomainCheckResult(
+            parser = self._parse_api_response(api_result.text)
+            if parser is not None:
+                return self._to_provider_result(
                     domain=domain,
-                    status="available",
-                    source="godaddy_page",
-                    prices=[PriceOption(source="godaddy", link=link)],
+                    parser=parser,
+                    request_result=api_result,
+                    source_url=source_url,
+                    fallback_used=False,
                 )
-            if '"isavailable":false' in text or '"available":false' in text:
-                return DomainCheckResult(
-                    domain=domain,
-                    status="taken",
-                    source="godaddy_page",
-                    prices=[PriceOption(source="godaddy", link=link)],
-                )
+        except Exception:
+            pass
 
-            return DomainCheckResult(
+        try:
+            page_result = await self.runner.request(
+                self.name,
+                "GET",
+                source_url,
+                timeout_seconds=self.runtime.timeout_seconds,
+                retries=self.runtime.retries,
+                cache_ttl_seconds=self.runtime.cache_ttl_seconds,
+            )
+            parser = parse_with_keyword_rules(page_result.text, domain, _GODADDY_RULES)
+            return self._to_provider_result(
                 domain=domain,
-                status="unknown",
-                source="godaddy",
-                detail="Could not determine availability",
-                prices=[],
+                parser=parser,
+                request_result=page_result,
+                source_url=source_url,
+                fallback_used=True,
             )
         except Exception as exc:
-            return DomainCheckResult(
+            error_lower = str(exc).lower()
+            if "rate" in error_lower:
+                status = FinalStatus.RATE_LIMITED
+            elif "blocked" in error_lower:
+                status = FinalStatus.BLOCKED
+            elif "temporary" in error_lower:
+                status = FinalStatus.TEMPORARILY_UNAVAILABLE
+            else:
+                status = FinalStatus.UNKNOWN
+            return self._error_result(
                 domain=domain,
-                status="unknown",
-                source="godaddy",
+                final_status=status,
                 detail=str(exc),
-                prices=[],
+                source_url=source_url,
+                request_url=source_url,
+                fallback_used=True,
             )
 
-    def _build_link(self, domain: str) -> Optional[str]:
-        return f"https://www.godaddy.com/en/domainsearch/find?domainToCheck={domain}"
+    def _parse_api_response(self, body: str) -> ParserResult | None:
+        try:
+            payload = json.loads(body)
+        except Exception:
+            return None
+
+        exact = payload.get("ExactMatchDomain") or {}
+        is_available = exact.get("IsAvailable")
+        price_info = exact.get("PriceInfo") or exact.get("Price")
+
+        price = None
+        currency = "USD"
+        if isinstance(price_info, dict):
+            price = price_info.get("ListPriceDisplay")
+            currency = price_info.get("Currency") or "USD"
+        elif isinstance(price_info, (int, float)):
+            price = f"${float(price_info):.2f}"
+            currency = "USD"
+
+        if is_available is True:
+            final_status = FinalStatus.STANDARD_PRICE if price else FinalStatus.AVAILABLE
+            return ParserResult(
+                final_status=final_status,
+                registration_price=price,
+                currency=currency,
+                note="godaddy api",
+                confidence=0.95,
+            )
+        if is_available is False:
+            return ParserResult(
+                final_status=FinalStatus.UNAVAILABLE,
+                registration_price=price,
+                currency=currency,
+                premium=bool(price and "," in price),
+                note="godaddy api",
+                confidence=0.95,
+            )
+
+        return None
+
+    def _split_domain(self, domain: str) -> tuple[str, str]:
+        if "." not in domain:
+            return domain, ""
+        sld, tld = domain.rsplit(".", 1)
+        return sld, tld

@@ -41,3 +41,5 @@ Thumbs.db
 *.sw?
 mobile-check/
 screenshots/
+registrar-logs-local/
+registrar-logs/

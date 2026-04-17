@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
+import logging
 
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
@@ -12,6 +13,7 @@ from src.models import CheckRequest, CheckResponse, DomainCheckResult, ErrorDeta
 from src.scraper import MultiRegistrarChecker
 
 scraper = MultiRegistrarChecker()
+logger = logging.getLogger("domain_checker.api")
 
 
 @asynccontextmanager
@@ -118,7 +120,9 @@ async def check_domains(payload: CheckRequest) -> CheckResponse:
         raise BrowserNotReadyError()
 
     domains = [d.strip().lower() for d in payload.domains]
+    logger.info("domain_check_started total_domains=%d", len(domains))
     results = await scraper.check_domains(domains)
+    logger.info("domain_check_completed total_domains=%d", len(results))
 
     return CheckResponse(
         results=results,
